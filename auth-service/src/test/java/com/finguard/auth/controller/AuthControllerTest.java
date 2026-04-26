@@ -1,6 +1,7 @@
 package com.finguard.auth.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.finguard.auth.config.SecurityConfig;
 import com.finguard.auth.dto.AuthResponse;
 import com.finguard.auth.dto.LoginRequest;
 import com.finguard.auth.dto.RegisterRequest;
@@ -9,7 +10,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
@@ -20,11 +23,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @WebMvcTest(AuthController.class)
+@Import(SecurityConfig.class)
 class AuthControllerTest {
 
     @Autowired MockMvc mockMvc;
     @Autowired ObjectMapper objectMapper;
     @MockBean AuthService authService;
+    @MockBean UserDetailsService userDetailsService;
 
     @Test
     void register_returns201_whenRequestValid() throws Exception {

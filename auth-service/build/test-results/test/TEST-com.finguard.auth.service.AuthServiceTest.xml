@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.finguard.auth.service.AuthServiceTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-04-26T22:27:04" hostname="MacBook-Pro-Arsenij.local" time="0.108">
+  <properties/>
+  <testcase name="register_throwsException_whenEmailAlreadyExists()" classname="com.finguard.auth.service.AuthServiceTest" time="0.101"/>
+  <testcase name="register_createsUser_whenEmailNotTaken()" classname="com.finguard.auth.service.AuthServiceTest" time="0.005"/>
+  <testcase name="login_returnsToken_whenCredentialsValid()" classname="com.finguard.auth.service.AuthServiceTest" time="0.002"/>
+  <system-out><![CDATA[2026-04-27T01:27:04.632+03:00  INFO 91472 --- [auth-service] [    Test worker] com.finguard.auth.service.AuthService    : Registered new user: id=b40e1149-f424-47d2-99c8-5405e55db3bc, role=USER
+2026-04-27T01:27:04.637+03:00  INFO 91472 --- [auth-service] [    Test worker] com.finguard.auth.service.AuthService    : User logged in: id=2b9679b9-6670-4045-81e6-2e4fbe6cb326
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
