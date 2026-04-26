@@ -258,9 +258,6 @@ All requests go through the API Gateway at `http://localhost:8080`. Protected ro
 ![Transactions](./docs/transactions.png)
 *Submit transactions and browse history with status badges (APPROVED / REVIEW_REQUIRED / BLOCKED).*
 
-### Fraud Alerts
-![Fraud Alerts](./docs/fraud-alerts.png)
-*Analyst view: full list of flagged transactions with risk scores and triggered rules.*
 
 ---
 
