@@ -1,0 +1,62 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origins: "*"
+            allowed-methods: "*"
+            allowed-headers: "*"
+            exposed-headers: "*"
+      routes:
+        - id: auth-service
+          uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/auth/**
+          filters:
+            - RewritePath=/api/auth/(?<segment>.*), /api/auth/$\{segment}
+
+        - id: transaction-service
+          uri: ${TRANSACTION_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/transactions/**
+          filters:
+            - RewritePath=/api/transactions/(?<segment>.*), /api/transactions/$\{segment}
+
+        - id: fraud-service
+          uri: ${FRAUD_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/fraud/**
+          filters:
+            - RewritePath=/api/fraud/(?<segment>.*), /api/fraud/$\{segment}
+
+        - id: audit-service
+          uri: ${AUDIT_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/audit/**
+          filters:
+            - RewritePath=/api/audit/(?<segment>.*), /api/audit/$\{segment}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: api-gateway-sse
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: java.util.Map
+      auto-offset-reset: latest
+
+jwt:
+  secret: ${JWT_SECRET:finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+
+logging:
+  level:
+    com.finguard: INFO
+    org.springframework.cloud.gateway: WARN

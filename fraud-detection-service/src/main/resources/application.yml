@@ -1,0 +1,81 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: fraud-detection-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/fraud_db}
+    username: ${SPRING_DATASOURCE_USERNAME:finguard}
+    password: ${SPRING_DATASOURCE_PASSWORD:finguard}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: fraud
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    open-in-view: false
+  flyway:
+    locations: classpath:db/migration
+    schemas: fraud
+    default-schema: fraud
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: fraud-detection-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: java.util.Map
+      auto-offset-reset: earliest
+
+jwt:
+  secret: ${JWT_SECRET:finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+
+fraud:
+  rules:
+    high-amount:
+      threshold: ${FRAUD_RULE_HIGH_AMOUNT_THRESHOLD:10000}
+      score: 30
+    velocity:
+      max-transactions: ${FRAUD_RULE_VELOCITY_MAX_TX:5}
+      window-minutes: ${FRAUD_RULE_VELOCITY_WINDOW_MINUTES:10}
+      score: 25
+    country-change:
+      score: 20
+    night-activity:
+      start-hour: 0
+      end-hour: 5
+      score: 15
+    suspicious-merchant:
+      categories: GAMBLING,CRYPTO,ADULT
+      score: 20
+    new-device:
+      score: 15
+    repeated-blocked:
+      lookback-hours: 24
+      min-count: 1
+      score: 25
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.finguard: INFO

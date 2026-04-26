@@ -1,0 +1,202 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: finguard
+      POSTGRES_PASSWORD: finguard
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - finguard-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finguard -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - finguard-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_LOG_RETENTION_HOURS: 24
+    networks:
+      - finguard-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - finguard-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build: ./auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/auth_db
+      SPRING_DATASOURCE_USERNAME: finguard
+      SPRING_DATASOURCE_PASSWORD: finguard
+      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+      JWT_EXPIRATION_MS: 86400000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  transaction-service:
+    build: ./transaction-service
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/transaction_db
+      SPRING_DATASOURCE_USERNAME: finguard
+      SPRING_DATASOURCE_PASSWORD: finguard
+      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  fraud-detection-service:
+    build: ./fraud-detection-service
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fraud_db
+      SPRING_DATASOURCE_USERNAME: finguard
+      SPRING_DATASOURCE_PASSWORD: finguard
+      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      FRAUD_RULE_HIGH_AMOUNT_THRESHOLD: 10000
+      FRAUD_RULE_VELOCITY_MAX_TX: 5
+      FRAUD_RULE_VELOCITY_WINDOW_MINUTES: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  notification-service:
+    build: ./notification-service
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notification_db
+      SPRING_DATASOURCE_USERNAME: finguard
+      SPRING_DATASOURCE_PASSWORD: finguard
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  audit-service:
+    build: ./audit-service
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/audit_db
+      SPRING_DATASOURCE_USERNAME: finguard
+      SPRING_DATASOURCE_PASSWORD: finguard
+      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+      AUTH_SERVICE_URL: http://auth-service:8081
+      TRANSACTION_SERVICE_URL: http://transaction-service:8082
+      FRAUD_SERVICE_URL: http://fraud-detection-service:8083
+      AUDIT_SERVICE_URL: http://audit-service:8085
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      - auth-service
+      - transaction-service
+      - fraud-detection-service
+      - audit-service
+    networks:
+      - finguard-net
+    restart: on-failure
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - finguard-net
+
+volumes:
+  postgres_data:
+
+networks:
+  finguard-net:
+    driver: bridge
