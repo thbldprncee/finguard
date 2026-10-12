@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// Dev server mirrors the nginx layout: /api -> gateway, /auth -> Keycloak.
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -9,6 +10,10 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
+      },
+      '/auth': {
+        target: 'http://localhost:8180',
+        xfwd: true,
       },
     },
   },

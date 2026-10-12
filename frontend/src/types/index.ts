@@ -1,10 +1,9 @@
-export interface AuthResponse {
-  token: string
-  tokenType: string
-  userId: string
-  email: string
-  role: string
-  expiresIn: number
+export interface Account {
+  id: string
+  accountNumber: string
+  currency: string
+  status: 'ACTIVE' | 'FROZEN'
+  createdAt: string
 }
 
 export interface Transaction {
@@ -25,12 +24,14 @@ export interface Transaction {
   updatedAt: string
 }
 
+/** Staff get every field; a USER gets transactionId, decision and analyzedAt only. */
 export interface FraudAnalysis {
   id: string
   transactionId: string
   riskScore: number
   decision: 'APPROVED' | 'REVIEW_REQUIRED' | 'BLOCKED'
   triggeredRules: string[]
+  failedRules: string[]
   explanation: string
   analyzedAt: string
 }
@@ -70,8 +71,6 @@ export interface CreateTransactionRequest {
   country: string
   merchantCategory?: string
   paymentMethod: string
-  ipAddress?: string
-  deviceId?: string
 }
 
 export type UserRole = 'USER' | 'ANALYST' | 'ADMIN'
