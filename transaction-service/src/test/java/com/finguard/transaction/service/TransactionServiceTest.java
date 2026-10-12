@@ -1,87 +1,159 @@
 package com.finguard.transaction.service;
 
+import com.finguard.transaction.config.TransactionProperties;
 import com.finguard.transaction.dto.CreateTransactionRequest;
+import com.finguard.transaction.entity.Account;
 import com.finguard.transaction.entity.IdempotencyKey;
 import com.finguard.transaction.entity.Transaction;
-import com.finguard.transaction.kafka.TransactionEventProducer;
+import com.finguard.transaction.exception.BusinessRuleException;
+import com.finguard.transaction.exception.IdempotencyKeyReuseException;
 import com.finguard.transaction.repository.IdempotencyKeyRepository;
 import com.finguard.transaction.repository.TransactionRepository;
+import com.finguard.transaction.security.AuthenticatedUser;
+import com.finguard.transaction.security.RequestMetadata;
+import jakarta.persistence.EntityNotFoundException;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class TransactionServiceTest {
 
     @Mock TransactionRepository transactionRepository;
     @Mock IdempotencyKeyRepository idempotencyKeyRepository;
-    @Mock TransactionEventProducer eventProducer;
+    @Mock AccountService accountService;
+    @Mock TransactionEvents transactionEvents;
 
-    @InjectMocks TransactionService transactionService;
+    TransactionService transactionService;
 
-    private CreateTransactionRequest sampleRequest() {
-        return new CreateTransactionRequest(
-                "ACC-001", "ACC-002",
-                new BigDecimal("500.00"), "USD", "US",
-                "RETAIL", "CARD", "192.168.1.1", "device-123"
-        );
+    private final UUID userId = UUID.randomUUID();
+    private final Account account = Account.builder().id(UUID.randomUUID()).accountNumber("FG0000000000000001")
+            .userId(userId).currency("USD").status(Account.Status.ACTIVE).build();
+
+    @BeforeEach
+    void setUp() {
+        transactionService = new TransactionService(transactionRepository, idempotencyKeyRepository,
+                accountService, transactionEvents,
+                new TransactionProperties(Set.of("USD", "EUR"), new BigDecimal("1000000"), Duration.ofHours(24), 5));
+        when(accountService.requireOwnedActive("FG0000000000000001", userId)).thenReturn(account);
+        when(transactionRepository.save(any())).thenAnswer(inv -> {
+            Transaction tx = inv.getArgument(0);
+            tx.setId(UUID.randomUUID());
+            return tx;
+        });
+    }
+
+    private CreateTransactionRequest request(String amount) {
+        return new CreateTransactionRequest("FG0000000000000001", "ACC-002", new BigDecimal(amount),
+                "USD", "US", "RETAIL", "CARD");
+    }
+
+    private RequestMetadata meta(String key) {
+        return new RequestMetadata(key, "corr-1", "203.0.113.5", "device-12345678");
     }
 
     @Test
-    void createTransaction_savesAndPublishesEvent() {
-        UUID userId = UUID.randomUUID();
-        Transaction saved = Transaction.builder()
-                .id(UUID.randomUUID())
-                .externalTransactionId("ext-123")
-                .userId(userId)
-                .sourceAccount("ACC-001")
-                .targetAccount("ACC-002")
-                .amount(new BigDecimal("500.00"))
-                .currency("USD")
-                .country("US")
-                .paymentMethod("CARD")
-                .status(Transaction.Status.PENDING)
-                .build();
+    void create_savesWithServerSideIpAndDevice_andWritesOutboxEvent() {
+        var result = transactionService.createTransaction(request("500.00"), userId, meta(null));
 
-        when(transactionRepository.save(any())).thenReturn(saved);
-
-        var response = transactionService.createTransaction(sampleRequest(), userId, null, "corr-1");
-
-        assertThat(response.status()).isEqualTo("PENDING");
-        assertThat(response.userId()).isEqualTo(userId);
-        verify(eventProducer).publishTransactionCreated(any(), eq("corr-1"));
+        ArgumentCaptor<Transaction> saved = ArgumentCaptor.forClass(Transaction.class);
+        verify(transactionRepository).save(saved.capture());
+        assertThat(saved.getValue().getIpAddress()).isEqualTo("203.0.113.5");
+        assertThat(saved.getValue().getDeviceId()).isEqualTo("device-12345678");
+        assertThat(result.replayed()).isFalse();
+        assertThat(result.transaction().status()).isEqualTo("PENDING");
+        verify(transactionEvents).created(any(), eq("corr-1"));
     }
 
     @Test
-    void createTransaction_returnsExisting_whenIdempotencyKeyAlreadyUsed() {
-        UUID userId = UUID.randomUUID();
+    void create_claimsIdempotencyKey_andAttachesTransaction() {
+        when(idempotencyKeyRepository.insertIfAbsent(any(), eq(userId), eq("key-12345678"), any(), any())).thenReturn(1);
+
+        var result = transactionService.createTransaction(request("10"), userId, meta("key-12345678"));
+
+        verify(idempotencyKeyRepository).attachTransaction(userId, "key-12345678", result.transaction().id());
+    }
+
+    @Test
+    void create_replaysExistingTransaction_whenKeyAlreadyClaimed() {
         UUID existingTxId = UUID.randomUUID();
-        String ikey = "ikey-abc";
+        Transaction existing = Transaction.builder().id(existingTxId).userId(userId).externalTransactionId("e")
+                .sourceAccount("FG0000000000000001").targetAccount("ACC-002").amount(BigDecimal.TEN)
+                .currency("USD").country("US").paymentMethod("CARD").status(Transaction.Status.APPROVED).build();
+        String hash = TransactionService.requestHash(request("10"));
+        when(idempotencyKeyRepository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(0);
+        when(idempotencyKeyRepository.findByUserIdAndIdempotencyKey(userId, "key-12345678"))
+                .thenReturn(Optional.of(IdempotencyKey.builder().userId(userId).idempotencyKey("key-12345678")
+                        .requestHash(hash).transactionId(existingTxId).build()));
+        when(transactionRepository.findById(existingTxId)).thenReturn(Optional.of(existing));
 
-        Transaction existingTx = Transaction.builder()
-                .id(existingTxId).userId(userId).externalTransactionId("ext-1")
-                .sourceAccount("A").targetAccount("B").amount(BigDecimal.TEN)
-                .currency("USD").country("US").paymentMethod("CARD")
-                .status(Transaction.Status.PENDING).build();
+        var result = transactionService.createTransaction(request("10.00"), userId, meta("key-12345678"));
 
-        when(idempotencyKeyRepository.findByIdempotencyKey(ikey))
-                .thenReturn(Optional.of(IdempotencyKey.builder().idempotencyKey(ikey).transactionId(existingTxId).build()));
-        when(transactionRepository.findById(existingTxId)).thenReturn(Optional.of(existingTx));
-
-        var response = transactionService.createTransaction(sampleRequest(), userId, ikey, null);
-
-        assertThat(response.id()).isEqualTo(existingTxId);
+        assertThat(result.replayed()).isTrue();
+        assertThat(result.transaction().id()).isEqualTo(existingTxId);
         verify(transactionRepository, never()).save(any());
-        verify(eventProducer, never()).publishTransactionCreated(any(), any());
+        verify(transactionEvents, never()).created(any(), any());
+    }
+
+    @Test
+    void create_rejectsKeyReuse_withDifferentPayload() {
+        when(idempotencyKeyRepository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(0);
+        when(idempotencyKeyRepository.findByUserIdAndIdempotencyKey(userId, "key-12345678"))
+                .thenReturn(Optional.of(IdempotencyKey.builder().requestHash("other").transactionId(UUID.randomUUID()).build()));
+
+        assertThatThrownBy(() -> transactionService.createTransaction(request("10"), userId, meta("key-12345678")))
+                .isInstanceOf(IdempotencyKeyReuseException.class);
+    }
+
+    @Test
+    void create_rejectsCurrencyMismatchWithAccount() {
+        var eur = new CreateTransactionRequest("FG0000000000000001", "ACC-002", BigDecimal.TEN, "EUR", "US", null, "CARD");
+
+        assertThatThrownBy(() -> transactionService.createTransaction(eur, userId, meta(null)))
+                .isInstanceOf(BusinessRuleException.class);
+    }
+
+    @Test
+    void create_rejectsAmountAboveLimit() {
+        assertThatThrownBy(() -> transactionService.createTransaction(request("1000000.01"), userId, meta(null)))
+                .isInstanceOf(BusinessRuleException.class);
+    }
+
+    @Test
+    void create_rejectsAccountOfAnotherUser() {
+        UUID attacker = UUID.randomUUID();
+        when(accountService.requireOwnedActive("FG0000000000000001", attacker))
+                .thenThrow(new BusinessRuleException("Source account not found"));
+
+        assertThatThrownBy(() -> transactionService.createTransaction(request("10"), attacker, meta(null)))
+                .isInstanceOf(BusinessRuleException.class);
+        verify(transactionRepository, never()).save(any());
+    }
+
+    @Test
+    void get_hidesOtherUsersTransaction_as404() {
+        UUID txId = UUID.randomUUID();
+        when(transactionRepository.findById(txId)).thenReturn(Optional.of(Transaction.builder().id(txId)
+                .userId(UUID.randomUUID()).status(Transaction.Status.PENDING).build()));
+
+        assertThatThrownBy(() -> transactionService.getTransaction(txId, new AuthenticatedUser(userId, "u@e.com", "USER")))
+                .isInstanceOf(EntityNotFoundException.class);
     }
 }
