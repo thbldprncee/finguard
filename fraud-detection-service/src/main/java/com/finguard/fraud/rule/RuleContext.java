@@ -19,5 +19,6 @@ public class RuleContext {
     private String paymentMethod;
     private String deviceId;
     private String ipAddress;
+    /** When the transaction was created, not when it is analysed (Kafka lag, retries). */
     private Instant occurredAt;
 }

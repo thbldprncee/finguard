@@ -1,53 +1,53 @@
 package com.finguard.fraud.rule.impl;
 
+import com.finguard.fraud.config.FraudProperties;
 import com.finguard.fraud.rule.FraudRuleEvaluator;
 import com.finguard.fraud.rule.RuleContext;
 import com.finguard.fraud.rule.RuleResult;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-
-@Slf4j
+/**
+ * Sliding window over a Redis sorted set: member = transactionId, score = creation time.
+ * Re-delivery of the same event re-adds the same member, so it is counted once
+ * (an INCR counter would count every delivery). A fixed INCR+EXPIRE window also resets
+ * at its boundary, letting 2x the limit through around it; the sliding window does not.
+ */
 @Component
 public class VelocityRule implements FraudRuleEvaluator {
 
-    private final StringRedisTemplate redisTemplate;
-    private final int maxTransactions;
-    private final int windowMinutes;
-    private final int score;
+    public static final String CODE = "VELOCITY";
 
-    public VelocityRule(
-            StringRedisTemplate redisTemplate,
-            @Value("${fraud.rules.velocity.max-transactions:5}") int maxTransactions,
-            @Value("${fraud.rules.velocity.window-minutes:10}") int windowMinutes,
-            @Value("${fraud.rules.velocity.score:25}") int score) {
-        this.redisTemplate = redisTemplate;
-        this.maxTransactions = maxTransactions;
-        this.windowMinutes = windowMinutes;
-        this.score = score;
+    private final StringRedisTemplate redis;
+    private final FraudProperties.Velocity settings;
+
+    public VelocityRule(StringRedisTemplate redis, FraudProperties properties) {
+        this.redis = redis;
+        this.settings = properties.rules().velocity();
     }
 
     @Override
     public String getRuleCode() {
-        return "VELOCITY";
+        return CODE;
     }
 
     @Override
     public RuleResult evaluate(RuleContext ctx) {
-        String key = "velocity:" + ctx.getUserId().toString();
-        Long count = redisTemplate.opsForValue().increment(key);
+        String key = "fraud:velocity:" + ctx.getUserId();
+        long at = ctx.getOccurredAt().toEpochMilli();
+        long windowStart = at - settings.window().toMillis();
+        ZSetOperations<String, String> zset = redis.opsForZSet();
 
-        if (count != null && count == 1) {
-            redisTemplate.expire(key, Duration.ofMinutes(windowMinutes));
-        }
+        zset.add(key, ctx.getTransactionId().toString(), at);
+        zset.removeRangeByScore(key, Double.NEGATIVE_INFINITY, windowStart);
+        Long count = zset.count(key, windowStart + 1, at);
+        redis.expire(key, settings.window().multipliedBy(2));
 
-        if (count != null && count > maxTransactions) {
-            return RuleResult.triggered(getRuleCode(), score,
-                    String.format("User made %d transactions in %d minutes (max %d)", count, windowMinutes, maxTransactions));
+        if (count != null && count > settings.maxTransactions()) {
+            return RuleResult.triggered(CODE, String.format("%d transactions within %d minutes (max %d)",
+                    count, settings.window().toMinutes(), settings.maxTransactions()));
         }
-        return RuleResult.notTriggered(getRuleCode());
+        return RuleResult.notTriggered(CODE);
     }
 }

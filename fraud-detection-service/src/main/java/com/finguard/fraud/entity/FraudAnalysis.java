@@ -5,7 +5,6 @@ import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -21,8 +20,12 @@ public class FraudAnalysis {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /** Unique: one analysis per transaction, which also makes re-delivered events no-ops. */
     @Column(nullable = false, unique = true)
     private UUID transactionId;
+
+    /** Owner of the transaction, used to restrict what a USER may read. */
+    private UUID userId;
 
     @Column(nullable = false)
     private int riskScore;
@@ -34,6 +37,10 @@ public class FraudAnalysis {
     @Column(columnDefinition = "TEXT[]")
     private String[] triggeredRules;
 
+    /** Rules that could not be evaluated; their presence escalates the decision. */
+    @Column(columnDefinition = "TEXT[]")
+    private String[] failedRules;
+
     @Column(columnDefinition = "TEXT")
     private String explanation;
 
@@ -42,6 +49,10 @@ public class FraudAnalysis {
     private Instant analyzedAt;
 
     public enum Decision {
-        APPROVED, REVIEW_REQUIRED, BLOCKED
+        APPROVED, REVIEW_REQUIRED, BLOCKED;
+
+        public Decision atLeast(Decision other) {
+            return ordinal() >= other.ordinal() ? this : other;
+        }
     }
 }

@@ -11,40 +11,33 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class SuspiciousMerchantRuleTest {
 
-    private final SuspiciousMerchantCategoryRule rule =
-            new SuspiciousMerchantCategoryRule("GAMBLING,CRYPTO,ADULT", 20);
+    private final SuspiciousMerchantCategoryRule rule = new SuspiciousMerchantCategoryRule(TestFraudProperties.defaults());
 
-    private RuleContext buildContext(String category) {
+    private RuleContext ctx(String category) {
         return RuleContext.builder()
-                .transactionId(UUID.randomUUID())
-                .userId(UUID.randomUUID())
-                .amount(BigDecimal.valueOf(100))
-                .country("US").currency("USD")
-                .paymentMethod("CARD")
-                .merchantCategory(category)
-                .occurredAt(Instant.now())
+                .transactionId(UUID.randomUUID()).userId(UUID.randomUUID())
+                .amount(BigDecimal.valueOf(100)).country("US").currency("USD").paymentMethod("CARD")
+                .merchantCategory(category).occurredAt(Instant.now())
                 .build();
     }
 
     @Test
     void triggers_forGamblingCategory() {
-        RuleResult result = rule.evaluate(buildContext("GAMBLING"));
-        assertThat(result.triggered()).isTrue();
-        assertThat(result.scoreContribution()).isEqualTo(20);
+        assertThat(rule.evaluate(ctx("GAMBLING")).triggered()).isTrue();
     }
 
     @Test
     void triggers_caseInsensitive() {
-        assertThat(rule.evaluate(buildContext("crypto")).triggered()).isTrue();
+        assertThat(rule.evaluate(ctx("crypto")).triggered()).isTrue();
     }
 
     @Test
     void doesNotTrigger_forRetailCategory() {
-        assertThat(rule.evaluate(buildContext("RETAIL")).triggered()).isFalse();
+        assertThat(rule.evaluate(ctx("RETAIL")).triggered()).isFalse();
     }
 
     @Test
     void doesNotTrigger_whenCategoryIsNull() {
-        assertThat(rule.evaluate(buildContext(null)).triggered()).isFalse();
+        assertThat(rule.evaluate(ctx(null)).triggered()).isFalse();
     }
 }
