@@ -1,0 +1,99 @@
+{
+  "realm": "finguard",
+  "displayName": "FinGuard",
+  "enabled": true,
+  "sslRequired": "${KEYCLOAK_SSL_REQUIRED:external}",
+
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "passwordPolicy": "length(12) and maxLength(128) and notUsername and notEmail",
+
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "maxDeltaTimeSeconds": 43200,
+  "minimumQuickLoginWaitSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+
+  "eventsEnabled": true,
+  "eventsExpiration": 2592000,
+  "enabledEventTypes": ["LOGIN", "LOGIN_ERROR", "REGISTER", "REGISTER_ERROR", "LOGOUT", "CODE_TO_TOKEN_ERROR", "REFRESH_TOKEN_ERROR"],
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+
+  "roles": {
+    "realm": [
+      { "name": "USER", "description": "Customer: own accounts and transactions" },
+      { "name": "ANALYST", "description": "Fraud analyst: all transactions, alerts and audit trail" },
+      { "name": "ADMIN", "description": "Administrator: also manages fraud rules" },
+      { "name": "offline_access", "description": "${role_offline-access}" },
+      { "name": "uma_authorization", "description": "${role_uma_authorization}" },
+      {
+        "name": "default-roles-finguard",
+        "description": "Granted on self-registration: USER only",
+        "composite": true,
+        "composites": { "realm": ["USER", "offline_access", "uma_authorization"] }
+      }
+    ]
+  },
+  "defaultRole": { "name": "default-roles-finguard" },
+
+  "clients": [
+    {
+      "clientId": "finguard-frontend",
+      "name": "FinGuard dashboard",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": ["${FINGUARD_PUBLIC_URL:http://localhost:3000}/*"],
+      "webOrigins": ["${FINGUARD_PUBLIC_URL:http://localhost:3000}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${FINGUARD_PUBLIC_URL:http://localhost:3000}/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "finguard-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "finguard-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "${FINGUARD_ADMIN_EMAIL:admin@finguard.local}",
+      "email": "${FINGUARD_ADMIN_EMAIL:admin@finguard.local}",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "FinGuard",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "${FINGUARD_ADMIN_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-finguard", "ADMIN"]
+    }
+  ]
+}
