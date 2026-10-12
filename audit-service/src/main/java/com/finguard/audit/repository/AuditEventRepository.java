@@ -12,4 +12,8 @@ public interface AuditEventRepository extends JpaRepository<AuditEvent, UUID> {
     Page<AuditEvent> findByEventType(String eventType, Pageable pageable);
 
     Page<AuditEvent> findByAggregateId(String aggregateId, Pageable pageable);
+
+    Page<AuditEvent> findByEventTypeAndAggregateId(String eventType, String aggregateId, Pageable pageable);
+
+    boolean existsByEventId(UUID eventId);
 }

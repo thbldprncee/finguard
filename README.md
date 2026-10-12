@@ -35,60 +35,59 @@ The entire system is designed to reflect real patterns used in production fintec
 ## Key Features
 
 - **Real-time fraud analysis** — transactions are evaluated as they arrive, not in batch
-- **Rule-based scoring engine** — 7 configurable rules produce a composite risk score (0–100)
+- **Rule-based scoring engine** — 8 rules; whether a rule is enabled and its weight live in the database and can be changed at runtime
+- **Fail-safe by design** — a rule that cannot be evaluated (e.g. Redis down) escalates the decision instead of silently lowering the risk score
 - **Three-tier risk decisions** — `APPROVED`, `REVIEW_REQUIRED`, `BLOCKED`
-- **Event-driven architecture** — services communicate exclusively through Kafka topics
-- **Idempotent transaction API** — duplicate submissions via the same `Idempotency-Key` are safely deduplicated
-- **JWT authentication** — stateless tokens validated at the gateway before any upstream call
-- **Role-based access control** — `USER` and `ANALYST` roles with different permission scopes
-- **Full audit trail** — every domain event is persisted in a dedicated audit database
-- **Notification system** — fraud outcomes generate notifications stored per user
-- **Live dashboard** — React frontend receives real-time updates via SSE from the API Gateway
-- **OpenAPI / Swagger UI** — interactive API docs on every backend service
-- **Schema isolation** — each service owns a dedicated PostgreSQL schema, migrated with Flyway
+- **Transactional Outbox** — state changes and their Kafka events are committed atomically; a relay publishes them afterwards
+- **Idempotency end to end** — concurrency-safe `Idempotency-Key` per user on the API, idempotent Kafka consumers, idempotent Redis rule state
+- **Keycloak (OpenID Connect)** — login, self-registration, brute-force protection and refresh-token rotation; services validate RS256 tokens via JWKS
+- **Role-based access control** — `USER`, `ANALYST`, `ADMIN`; users only ever see their own accounts, transactions and live events
+- **Hardened infrastructure** — Kafka with SASL/SCRAM + per-service ACLs, one database role per service, Redis password, no default secrets, nothing internal published to the host
+- **Full audit trail** — domain events stored once per event id; Keycloak keeps login and admin events
+- **Live dashboard** — authenticated SSE feed from the API Gateway, filtered per user
 
 ---
 
 ## Architecture
 
-FinGuard follows a **microservices architecture** where each service is independently deployable, owns its own database schema, and communicates asynchronously through Kafka.
-
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      React Frontend :3000                     │
-│              Dashboard · Transactions · Fraud Alerts          │
-└─────────────────────────┬────────────────────────────────────┘
-                          │  HTTP + SSE
-┌─────────────────────────▼────────────────────────────────────┐
-│                    API Gateway  :8080                         │
-│    JWT validation · Correlation ID · Route proxy · SSE feed  │
-└───┬──────────┬──────────┬────────────────────────┬───────────┘
-    │          │          │                         │
- :8081      :8082      :8083                     :8085
-Auth Svc  Txn Svc   Fraud Svc               Audit Svc
-    │          │          │                         │
-    └────┬─────┘    ┌─────┴──────────────────┐      │
-         │          │        Kafka            │      │
-         │    transaction.created ───────────►       │
-         │    fraud.analysis.completed ──────►──────►│
-         │    audit.event.created ───────────►───────┘
-         │                    │
-         │               :8084 Notification Svc
-         │
-   PostgreSQL (5 schemas) · Redis
+                     Browser (React SPA, OIDC + PKCE)
+                                 │
+                 ┌───────────────▼────────────────┐
+                 │  nginx :3000                   │
+                 │  /        static SPA           │
+                 │  /auth/*  ──► Keycloak         │  (admin console only on 127.0.0.1:8180)
+                 │  /api/*   ──► API Gateway      │
+                 └───────────────┬────────────────┘
+                                 │ Bearer access token (RS256)
+                 ┌───────────────▼────────────────┐
+                 │  API Gateway :8080             │  validates JWT (JWKS, iss, aud), strips
+                 │  routes · SSE feed per user    │  client X-User-*/X-Client-Ip, sets X-Client-Ip
+                 └──┬──────────────┬──────────┬───┘
+                    │              │          │
+           Transaction Svc   Fraud Svc   Audit Svc      every service validates the token again
+            (accounts, tx)  (rule engine)
+                    │   outbox      │ outbox
+                    ▼               ▼
+        ┌──────────────── Kafka (SASL/SCRAM + ACLs) ────────────────┐
+        │ transaction.created ─► Fraud, Audit, Gateway              │
+        │ fraud.analysis.completed ─► Transaction, Notification,    │
+        │                             Audit, Gateway                │
+        │ audit.event.created ─► Audit                              │
+        └───────────────────────────────────────────────────────────┘
+   PostgreSQL: one database + role per service (and Keycloak) · Redis: rule state
 ```
-
-![Architecture Diagram](./docs/architecture.png)
 
 ### Request flow
 
-1. Client sends `POST /api/transactions` with a JWT and an `Idempotency-Key` header
-2. API Gateway validates the JWT and proxies the request to Transaction Service
-3. Transaction Service persists the transaction and publishes a `transaction.created` event to Kafka
-4. Fraud Detection Service consumes the event, evaluates all rules, computes a risk score, and publishes `fraud.analysis.completed`
-5. Transaction Service consumes the fraud result and updates the transaction status
-6. Notification Service and Audit Service consume events in parallel and persist their own records
-7. API Gateway's SSE endpoint streams the fraud result to the connected frontend in real time
+1. The SPA signs the user in through Keycloak (Authorization Code + PKCE) and keeps tokens in memory only
+2. `POST /api/transactions` with the access token and an `Idempotency-Key`
+3. The gateway validates the token, removes any client-supplied identity/IP headers and adds `X-Client-Ip` from the connection
+4. Transaction Service checks that the source account belongs to the caller, claims the idempotency key and writes **the transaction and its outbox event in one database transaction**
+5. The outbox relay publishes `transaction.created` (keyed by user id, so one user's events are processed in order)
+6. Fraud Detection skips already-analysed transactions, evaluates the enabled rules, and writes the analysis plus its `fraud.analysis.completed` outbox event in one transaction
+7. Transaction Service moves the transaction from `PENDING` to the decision (once); Notification and Audit consume in parallel
+8. The gateway forwards events to SSE subscribers: staff see all, a user only their own (without rule details)
 
 ---
 
@@ -99,15 +98,15 @@ Auth Svc  Txn Svc   Fraud Svc               Audit Svc
 |------------|---------|---------|
 | Java | 21 | Language |
 | Spring Boot | 3.3.5 | Application framework |
-| Spring Cloud Gateway | 4.1.5 | API gateway, JWT filter, SSE |
-| Spring Security | 6.x | Authentication & authorization |
+| Spring Cloud Gateway | 4.1.5 | API gateway, token validation, SSE |
+| Spring Security | 6.x | OAuth2 Resource Server (JWT, JWKS) |
+| Keycloak | 26 | Identity provider (OIDC), users, roles, brute-force protection |
 | Spring Data JPA | 3.x | ORM / database access |
 | Spring Kafka | 3.x | Kafka producer & consumer |
-| PostgreSQL | 16 | Persistent storage (5 schemas) |
-| Redis | 7 | Velocity rule counter (sliding window) |
+| PostgreSQL | 16 | One database per service + Keycloak |
+| Redis | 7 | Rule state: sliding windows, devices, countries |
 | Apache Kafka | 7.6 | Async event bus |
 | Flyway | 10.x | Database schema migrations |
-| JJWT | 0.12.6 | JWT issuance and validation |
 | Lombok | latest | Boilerplate reduction |
 | SpringDoc OpenAPI | 2.6.0 | Swagger UI per service |
 
@@ -120,6 +119,7 @@ Auth Svc  Txn Svc   Fraud Svc               Audit Svc
 | Tailwind CSS | Styling |
 | React Query | Server state management |
 | Axios | HTTP client |
+| keycloak-js | OIDC login, token refresh |
 | Recharts | Charts and data visualization |
 
 ### Infrastructure & Testing
@@ -135,129 +135,93 @@ Auth Svc  Txn Svc   Fraud Svc               Audit Svc
 
 ## Service Reference
 
-| Service | Port | Responsibilities |
-|---------|------|-----------------|
-| `api-gateway` | 8080 | JWT validation, request routing, SSE real-time feed |
-| `auth-service` | 8081 | User registration, login, JWT issuance |
-| `transaction-service` | 8082 | Create transactions, idempotency, status lifecycle |
-| `fraud-detection-service` | 8083 | Rule engine, risk scoring, fraud decisions |
-| `notification-service` | 8084 | Consume fraud results, persist notification history |
-| `audit-service` | 8085 | Consume all domain events, immutable audit trail |
+| Service | Responsibilities |
+|---------|-----------------|
+| `keycloak` | Users, login/registration, tokens, roles, brute-force protection, login and admin events |
+| `api-gateway` | Token validation, routing, client IP, correlation id, per-user SSE feed |
+| `transaction-service` | Accounts, transactions, concurrency-safe idempotency, status lifecycle, outbox |
+| `fraud-detection-service` | Rule engine, risk scoring, fraud decisions, rule administration, outbox |
+| `notification-service` | Consumes fraud results, one notification per transaction and type (no HTTP API) |
+| `audit-service` | Stores every domain event once, audit trail queries |
+
+None of the services publishes a port in `docker-compose.yml`; only nginx (:3000), the gateway (127.0.0.1:8080) and the Keycloak admin console (127.0.0.1:8180) are reachable from the host.
 
 ---
 
 ## Fraud Detection Engine
 
-The core of FinGuard is a configurable, rule-based scoring system. Each rule evaluates a property of the incoming transaction and contributes a fixed score. Rules run independently and their scores accumulate.
+Each rule reports whether it fired and why. The score it adds is its **weight from the `fraud_rules` table**; disabling or re-weighting a rule via `PATCH /api/fraud/rules/{id}` takes effect immediately (the engine reloads the settings after the update and every 30 s). Start-up fails if a rule implementation has no database row.
 
-### Rules
-
-| Rule | Trigger | Risk Score |
-|------|---------|-----------|
-| `HIGH_AMOUNT` | Transaction amount exceeds $10,000 | +30 |
-| `VELOCITY` | More than 5 transactions in a 10-minute window (Redis counter) | +25 |
+| Rule | Trigger | Default weight |
+|------|---------|---------------|
+| `HIGH_AMOUNT` | Amount above the per-currency threshold (USD 10 000, EUR 9 000, …) | +30 |
+| `VELOCITY` | More than 5 transactions in a sliding 10-minute window | +25 |
+| `STRUCTURING` | ≥ 3 transactions in 24 h, each below the threshold, together above it | +25 |
 | `REPEATED_BLOCKED` | User had a blocked transaction in the last 24 hours | +25 |
-| `COUNTRY_CHANGE` | Transaction country differs from the user's previous transaction | +20 |
-| `SUSPICIOUS_MERCHANT` | Merchant category is `GAMBLING`, `CRYPTO`, or `ADULT` | +20 |
-| `NIGHT_ACTIVITY` | Transaction submitted between 00:00–05:00 UTC | +15 |
-| `NEW_DEVICE` | Device ID has never been seen before for this user | +15 |
+| `COUNTRY_CHANGE` | Country differs from the user's previous transaction | +20 |
+| `SUSPICIOUS_MERCHANT` | Merchant category `GAMBLING`, `CRYPTO` or `ADULT` | +20 |
+| `NIGHT_ACTIVITY` | Created between 00:00–05:00 (zone configurable) | +15 |
+| `NEW_DEVICE` | First transaction from a device id — or no device id at all | +15 |
 
-### Risk Decision Thresholds
+Time-based rules use the transaction's creation time, not the time of analysis.
 
-| Score Range | Decision | Meaning |
-|------------|----------|---------|
-| 0 – 39 | `APPROVED` | Low risk — transaction proceeds |
-| 40 – 69 | `REVIEW_REQUIRED` | Elevated risk — flagged for analyst review |
-| 70 – 100 | `BLOCKED` | High risk — transaction rejected |
+### Decisions and failures
 
-### Why rule-based?
+| Score | Decision |
+|-------|----------|
+| 0 – 39 | `APPROVED` |
+| 40 – 69 | `REVIEW_REQUIRED` |
+| 70 – 100 | `BLOCKED` |
 
-Rule-based systems are the industry standard for the first layer of fraud detection. They are:
-- **Explainable** — every decision has a clear, auditable reason
-- **Fast** — rules evaluate in microseconds with no model inference overhead
-- **Configurable** — thresholds can be tuned without redeployment
-- **Complementary** — typically paired with ML models in production (ML catches novel patterns; rules catch known ones)
+If any rule cannot be evaluated, the decision is raised to at least `REVIEW_REQUIRED` (`FRAUD_ON_RULE_FAILURE=BLOCK` blocks instead). An event that still fails after its retries reaches the dead-letter handler, which records the same failure-policy decision — a transaction never stays `PENDING` silently.
 
-All thresholds are configurable via environment variables (see [Configuration](#configuration)).
+### Idempotency under at-least-once delivery
+
+Kafka may deliver an event more than once. Fraud Detection skips transactions that already have an analysis, and the Redis-backed rules are idempotent per transaction id (sorted sets keyed by transaction id for velocity, structuring and blocked history; "first transaction seen" for devices; "previous country" remembered per transaction). A re-delivered event therefore yields the same score and is counted once.
 
 ---
 
 ## Event-Driven Flow
 
-Services never call each other directly. All cross-service communication is asynchronous through Kafka topics.
-
-```
-Transaction Service  ──► transaction.created       ──► Fraud Detection Service
-Fraud Detection Svc  ──► fraud.analysis.completed  ──► Transaction Service
-                                                    ──► Notification Service
-                                                    ──► Audit Service
-                                                    ──► API Gateway (SSE)
-Auth Service         ──► audit.event.created        ──► Audit Service
-```
-
-### Kafka Topics
-
-| Topic | Producer | Consumers |
+| Topic | Producer (via outbox) | Consumers |
 |-------|----------|-----------|
-| `transaction.created` | Transaction Service | Fraud Detection Service |
-| `fraud.analysis.completed` | Fraud Detection Service | Transaction Service, Notification Service, Audit Service, API Gateway |
-| `audit.event.created` | Auth Service, Transaction Service | Audit Service |
+| `transaction.created` | Transaction Service (key: user id) | Fraud Detection, Audit, Gateway |
+| `fraud.analysis.completed` | Fraud Detection (key: transaction id) | Transaction, Notification, Audit, Gateway |
+| `audit.event.created` | Fraud Detection (rule changes) | Audit |
 
-The API Gateway subscribes to `fraud.analysis.completed` and forwards results to connected browser clients via Server-Sent Events, enabling the dashboard to update without polling.
+Every record carries `X-Event-Id`, `X-Event-Type` and `X-Correlation-Id` headers. Each consumer uses its own retry/DLT topics (e.g. `fraud.analysis.completed-txn-retry-0`), so a failure in one service is never re-delivered to another. Kafka requires SCRAM authentication and each service may only read/write its own topics — only Fraud Detection can publish fraud decisions.
 
 ---
 
 ## API Reference
 
-All requests go through the API Gateway at `http://localhost:8080`. Protected routes require `Authorization: Bearer <token>`.
+All requests go through nginx (`http://localhost:3000/api/...`) with `Authorization: Bearer <access token>` issued by Keycloak.
 
-### Auth
-| Method | Endpoint | Auth | Description |
+| Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
-| `POST` | `/api/auth/register` | Public | Register a new user |
-| `POST` | `/api/auth/login` | Public | Login and receive JWT |
+| `GET` | `/api/accounts` | USER | My accounts |
+| `POST` | `/api/accounts` | USER | Open an account `{"currency":"USD"}` |
+| `POST` | `/api/transactions` | USER | Create a transaction (from one of my accounts); optional `Idempotency-Key`, `X-Device-Id` |
+| `GET` | `/api/transactions` | USER | My transactions (all for ANALYST/ADMIN) |
+| `GET` | `/api/transactions/{id}` | USER | One transaction (404 if not mine) |
+| `GET` | `/api/fraud/analysis/{transactionId}` | USER | Decision for my transaction; full analysis for staff |
+| `GET` | `/api/fraud/alerts` | ANALYST | `REVIEW_REQUIRED` and `BLOCKED` analyses |
+| `GET` | `/api/fraud/rules` | ANALYST | Rules with weights |
+| `PATCH` | `/api/fraud/rules/{id}` | ADMIN | Enable/disable, change weight (audited) |
+| `GET` | `/api/audit/events` | ANALYST | Audit trail (`eventType`, `aggregateId` filters) |
+| `GET` | `/api/sse/events` | USER | Live events (own only for USER) |
 
-### Transactions
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `POST` | `/api/transactions` | USER | Submit a new transaction |
-| `GET` | `/api/transactions` | USER | List user's transactions |
-| `GET` | `/api/transactions/{id}` | USER | Get transaction details |
-
-### Fraud
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/api/fraud/alerts` | ANALYST | List all fraud alerts |
-| `GET` | `/api/fraud/analysis/{transactionId}` | ANALYST | Get fraud analysis for a transaction |
-| `GET` | `/api/fraud/rules` | ANALYST | List active fraud rules |
-| `PATCH` | `/api/fraud/rules/{id}` | ANALYST | Update a fraud rule |
-
-### Audit
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/api/audit/events` | ANALYST | Query the audit trail |
-
-### Real-time
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/api/gateway/sse` | USER | Subscribe to live fraud results |
+Reusing an `Idempotency-Key` with the same body returns the original transaction (`200`, `Idempotent-Replayed: true`); with a different body it is rejected with `422`.
 
 ---
 
 ## Screenshots
 
-### Login / Register
-![Login](./docs/login.png)
-*Authentication page with role selection (User / Analyst) for new account registration.*
-
 ### Dashboard
 ![Dashboard](./docs/dashboard.png)
-*Live overview: transaction volume, fraud rate by decision, and the real-time fraud event feed.*
 
 ### Transactions
 ![Transactions](./docs/transactions.png)
-*Submit transactions and browse history with status badges (APPROVED / REVIEW_REQUIRED / BLOCKED).*
-
 
 ---
 
@@ -266,128 +230,55 @@ All requests go through the API Gateway at `http://localhost:8080`. Protected ro
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- No other local dependencies required — the full stack runs in containers
 
 ### Run
 
 ```bash
 git clone https://github.com/<your-username>/finguard.git
 cd finguard
+scripts/generate-env.sh        # random secrets into .env (git-ignored)
 docker compose up --build
 ```
 
-The first build downloads ~400 MB of base images (Gradle, JDK, Node) and compiles all services. Subsequent builds use Docker's layer cache and complete in under a minute.
+There are no default passwords: compose refuses to start until `.env` exists. Database roles and Kafka users are created on first start, so after upgrading from an older version recreate the volumes once with `docker compose down -v`.
 
 ### Access
 
-| Interface | URL |
-|-----------|-----|
-| **Frontend** | http://localhost:3000 |
-| **API Gateway** | http://localhost:8080 |
-| **Auth Swagger** | http://localhost:8081/swagger-ui.html |
-| **Transaction Swagger** | http://localhost:8082/swagger-ui.html |
-| **Fraud Swagger** | http://localhost:8083/swagger-ui.html |
-| **Audit Swagger** | http://localhost:8085/swagger-ui.html |
+| Interface | URL | Credentials |
+|-----------|-----|-------------|
+| **Frontend** | http://localhost:3000 | register on the login page (role USER), or `FINGUARD_ADMIN_EMAIL` / `FINGUARD_ADMIN_PASSWORD` from `.env` (ADMIN) |
+| **Keycloak admin console** | http://127.0.0.1:8180/auth/admin | `admin` / `KEYCLOAK_ADMIN_PASSWORD` |
 
-### Create accounts
+Granting `ANALYST` or `ADMIN`: Keycloak admin console → realm `finguard` → Users → *user* → Role mapping. The change applies with the user's next access token (at most 5 minutes).
 
-Register a regular user and an analyst from the login page, or via curl:
-
-```bash
-# USER account
-curl -X POST http://localhost:8080/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@demo.com","password":"password123","role":"USER"}'
-
-# ANALYST account
-curl -X POST http://localhost:8080/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email":"analyst@demo.com","password":"password123","role":"ANALYST"}'
-```
-
-### Submit transactions
-
-```bash
-TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"user@demo.com","password":"password123"}' | jq -r '.token')
-
-# Low-risk transaction → APPROVED
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d '{
-    "sourceAccount": "ACC-001",
-    "targetAccount": "ACC-002",
-    "amount": 150.00,
-    "currency": "USD",
-    "country": "US",
-    "merchantCategory": "RETAIL",
-    "paymentMethod": "CARD",
-    "deviceId": "device-known"
-  }'
-
-# High-risk transaction → BLOCKED (score: HIGH_AMOUNT+30, SUSPICIOUS_MERCHANT+20, NEW_DEVICE+15 = 65+)
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d '{
-    "sourceAccount": "ACC-001",
-    "targetAccount": "ACC-999",
-    "amount": 15000.00,
-    "currency": "USD",
-    "country": "RU",
-    "merchantCategory": "GAMBLING",
-    "paymentMethod": "CRYPTO",
-    "deviceId": "device-new-unknown"
-  }'
-```
+For local debugging, `docker compose -f docker-compose.yml -f docker-compose.dev.yml up` additionally publishes the databases, Kafka (SCRAM credentials from `.env`) and the services on 127.0.0.1 and enables Swagger UI. `npm run dev` in `frontend/` proxies `/api` and `/auth` the same way nginx does.
 
 ---
 
 ## Configuration
 
-All fraud thresholds and service settings are configurable via environment variables in `docker-compose.yml`:
+Secrets come from `.env` (see `.env.example`). Service settings are typed `@ConfigurationProperties` records validated at start-up:
 
-```env
-# JWT
-JWT_SECRET=your-long-secret-key-min-32-chars
-
-# Fraud rules
-FRAUD_RULE_HIGH_AMOUNT_THRESHOLD=10000   # Amount in USD above which HIGH_AMOUNT fires
-FRAUD_RULE_VELOCITY_MAX_TX=5             # Max transactions before VELOCITY fires
-FRAUD_RULE_VELOCITY_WINDOW_MINUTES=10    # Sliding window duration for velocity check
-
-# Database
-SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/auth_db
-SPRING_DATASOURCE_USERNAME=finguard
-SPRING_DATASOURCE_PASSWORD=finguard
-
-# Kafka
-KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-
-# Redis
-SPRING_DATA_REDIS_HOST=redis
-SPRING_DATA_REDIS_PORT=6379
-```
+| Prefix | Service | Examples |
+|--------|---------|----------|
+| `finguard.security.oidc` | all APIs | `issuer`, `jwk-set-uri`, `audience` |
+| `finguard.fraud` | fraud | `decision.on-rule-failure`, `rules.high-amount.thresholds.EUR`, `rules.velocity.window` |
+| `finguard.transactions` | transaction | `supported-currencies`, `max-amount`, `idempotency-key-ttl` |
+| `finguard.outbox` | transaction, fraud | `poll-interval`, `batch-size`, `retention` |
+| `finguard.gateway` | gateway | `trust-proxy-headers`, `sse-heartbeat` |
 
 ---
 
 ## Running Tests
 
-Tests use Testcontainers, so Docker must be running.
+Tests use Testcontainers (PostgreSQL, Kafka, Redis), so Docker must be running. Without a local JDK 21:
 
 ```bash
-# Per service
-cd auth-service            && ./gradlew test --no-daemon
-cd transaction-service     && ./gradlew test --no-daemon
-cd fraud-detection-service && ./gradlew test --no-daemon
-
-# Frontend type check
-cd frontend && npm run type-check
+scripts/gradle-docker.sh transaction-service test
+scripts/gradle-docker.sh fraud-detection-service test
 ```
+
+Highlights: 8 concurrent requests with one `Idempotency-Key` create exactly one transaction and one outbox event; outbox events reach Kafka with the right key and headers; a twice-delivered event yields one analysis; disabling a rule in the database changes the score; a malformed event ends in `REVIEW_REQUIRED` via the DLT; tokens with a wrong issuer, audience, algorithm or without a role are rejected; the SSE feed requires a token and only delivers a user's own events.
 
 ---
 
@@ -395,33 +286,32 @@ cd frontend && npm run type-check
 
 ```
 finguard/
-├── api-gateway/                # Spring Cloud Gateway + JWT filter + SSE endpoint
-│   └── src/main/java/
-│       ├── filter/             # JwtAuthFilter, CorrelationIdFilter
-│       ├── config/             # SecurityConfig, route config
-│       └── sse/                # Server-Sent Events controller
-├── auth-service/               # User registration, login, JWT issuance
-├── transaction-service/        # Transaction CRUD, idempotency, Kafka producer
-├── fraud-detection-service/    # Rule engine, risk scoring, Redis velocity counter
-├── notification-service/       # Fraud result consumer, notification persistence
-├── audit-service/              # Immutable event log, audit trail queries
-├── frontend/                   # React 18 + TypeScript dashboard
-├── docker-compose.yml
-└── init-db.sql                 # Creates 5 PostgreSQL databases on first start
+├── api-gateway/                # Spring Cloud Gateway, token validation, SSE feed
+├── transaction-service/        # Accounts, transactions, idempotency, outbox
+├── fraud-detection-service/    # Rule engine, Redis rule state, outbox
+├── notification-service/       # Fraud result consumer
+├── audit-service/              # Audit trail
+├── frontend/                   # React 18 + TypeScript dashboard, nginx config
+├── infra/
+│   ├── keycloak/               # Realm import: roles, client, brute-force and token settings
+│   ├── kafka/                  # SCRAM users, topics, ACLs
+│   └── postgres/               # One database and role per service
+├── scripts/                    # generate-env.sh, gradle-docker.sh
+└── docker-compose.yml
 ```
 
 ---
 
 ## Design Decisions
 
-**Why Kafka instead of direct HTTP calls between services?**
-Kafka decouples producers from consumers. If the Fraud Detection Service is temporarily slow or restarting, transactions queue in Kafka and are processed when the service recovers — no requests are lost and no service needs to know about another's health.
+**Why a Transactional Outbox?**
+`@Transactional` does not span PostgreSQL and Kafka. Saving a transaction and then calling `kafkaTemplate.send()` can commit the row while the event is lost (or publish an event for a row that is rolled back). The outbox row is written in the same database transaction; a relay polls with `FOR UPDATE SKIP LOCKED` and publishes. Delivery becomes at-least-once, which is why every consumer is idempotent.
 
-**Why separate databases per service?**
-Each service owns its schema (`auth`, `txn`, `fraud`, `notification`, `audit`). This enforces domain boundaries, prevents accidental coupling through shared tables, and allows each service to evolve its schema independently via Flyway migrations.
+**Why claim the idempotency key with `INSERT … ON CONFLICT DO NOTHING`?**
+"Check if the key exists, then insert" lets two concurrent requests both pass the check. The unique index makes the second insert wait for the first transaction and then report the conflict, so exactly one request creates the transaction and the other returns it. Keys are scoped per user and bound to a hash of the request.
 
-**Why Redis for the velocity rule?**
-Counting transactions in a sliding time window requires fast, atomic increments with automatic expiry. Redis `INCR` + `EXPIRE` is purpose-built for this and avoids a database query on every transaction.
+**Why Keycloak instead of a home-made auth service?**
+Password storage, brute-force protection, refresh-token rotation, revocation and role administration are solved problems. With RS256 the services hold only public keys, so no service can mint tokens — unlike a shared HMAC secret.
 
-**Why rule-based scoring?**
-Rules are transparent, auditable, and fast. The scoring model makes it easy to add new rules or tune thresholds without touching existing logic. In a real system, this layer would sit in front of an ML model that handles more complex patterns.
+**Why fail-safe rules?**
+For an anti-fraud system, "the check could not run" must never look like "the check passed".

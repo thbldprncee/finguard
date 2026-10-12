@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directories:
+      - /api-gateway
+      - /transaction-service
+      - /fraud-detection-service
+      - /notification-service
+      - /audit-service
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories:
+      - /api-gateway
+      - /transaction-service
+      - /fraud-detection-service
+      - /notification-service
+      - /audit-service
+      - /frontend
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

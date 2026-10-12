@@ -6,11 +6,15 @@ import RiskBadge from '../components/RiskBadge'
 import { fraudApi } from '../api/fraudApi'
 import { transactionApi } from '../api/transactionApi'
 import { useSSE } from '../hooks/useSSE'
+import { useAuth } from '../context/AuthContext'
 import { Wifi, WifiOff } from 'lucide-react'
 
 const COLORS = { APPROVED: '#22c55e', REVIEW_REQUIRED: '#eab308', BLOCKED: '#ef4444', PENDING: '#6b7280' }
 
 export default function DashboardPage() {
+  const { hasRole } = useAuth()
+  const isStaff = hasRole('ANALYST', 'ADMIN')
+
   const { data: transactions } = useQuery({
     queryKey: ['transactions'],
     queryFn: () => transactionApi.list(0, 100),
@@ -19,6 +23,7 @@ export default function DashboardPage() {
   const { data: alerts } = useQuery({
     queryKey: ['alerts'],
     queryFn: () => fraudApi.getAlerts(0, 5),
+    enabled: isStaff,
   })
 
   const { events, connected } = useSSE('/api/sse/events')
@@ -102,7 +107,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">
+        {isStaff && <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">
           <h2 className="text-base font-semibold text-white mb-4">Recent Alerts</h2>
           <div className="space-y-2">
             {(alerts?.content ?? []).map((alert) => (
@@ -118,7 +123,7 @@ export default function DashboardPage() {
               <p className="text-gray-500 text-sm">No alerts</p>
             )}
           </div>
-        </div>
+        </div>}
       </div>
     </Layout>
   )

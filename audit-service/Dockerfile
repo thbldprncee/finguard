@@ -6,7 +6,9 @@ COPY src ./src
 RUN gradle bootJar --no-daemon -q
 
 FROM eclipse-temurin:21-jre-alpine
+RUN addgroup -S app && adduser -S -G app -H -s /sbin/nologin app
 WORKDIR /app
-COPY --from=build /app/build/libs/*.jar app.jar
+COPY --from=build --chown=app:app /app/build/libs/*.jar app.jar
+USER app
 EXPOSE 8085
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]

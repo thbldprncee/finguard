@@ -1,62 +1,41 @@
-import React, { createContext, useContext, useState, useCallback } from 'react'
-import type { AuthResponse, UserRole } from '../types'
+import React, { createContext, useCallback, useContext, useMemo } from 'react'
+import type { UserRole } from '../types'
+import { currentRoles, keycloak } from '../auth/keycloak'
 
 interface AuthUser {
   userId: string
   email: string
   role: UserRole
-  token: string
+  roles: UserRole[]
 }
 
 interface AuthContextValue {
-  user: AuthUser | null
-  login: (response: AuthResponse) => void
+  user: AuthUser
   logout: () => void
-  isAuthenticated: boolean
   hasRole: (...roles: UserRole[]) => boolean
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
-function loadUser(): AuthUser | null {
-  try {
-    const raw = localStorage.getItem('finguard_user')
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
+/** Rendered only after keycloak.init() succeeded (see main.tsx), so a user always exists. */
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(loadUser)
-
-  const login = useCallback((response: AuthResponse) => {
-    const authUser: AuthUser = {
-      userId: response.userId,
-      email: response.email,
-      role: response.role as UserRole,
-      token: response.token,
+  const user = useMemo<AuthUser>(() => {
+    const roles = currentRoles()
+    return {
+      userId: keycloak.subject ?? '',
+      email: (keycloak.tokenParsed?.email as string | undefined) ?? '',
+      role: roles[0] ?? 'USER',
+      roles,
     }
-    localStorage.setItem('finguard_token', response.token)
-    localStorage.setItem('finguard_user', JSON.stringify(authUser))
-    setUser(authUser)
   }, [])
 
   const logout = useCallback(() => {
-    localStorage.removeItem('finguard_token')
-    localStorage.removeItem('finguard_user')
-    setUser(null)
+    keycloak.logout({ redirectUri: window.location.origin })
   }, [])
 
-  const hasRole = useCallback((...roles: UserRole[]) => {
-    return user ? roles.includes(user.role) : false
-  }, [user])
+  const hasRole = useCallback((...roles: UserRole[]) => roles.some((r) => user.roles.includes(r)), [user])
 
-  return (
-    <AuthContext.Provider value={{ user, login, logout, isAuthenticated: !!user, hasRole }}>
-      {children}
-    </AuthContext.Provider>
-  )
+  return <AuthContext.Provider value={{ user, logout, hasRole }}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

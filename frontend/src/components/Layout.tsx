@@ -1,23 +1,18 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { ShieldCheck, LayoutDashboard, ArrowLeftRight, AlertTriangle, FileText, LogOut } from 'lucide-react'
+import type { UserRole } from '../types'
 
-const navItems = [
+const navItems: { to: string; label: string; icon: typeof LayoutDashboard; roles?: UserRole[] }[] = [
   { to: '/dashboard',     label: 'Dashboard',     icon: LayoutDashboard },
   { to: '/transactions',  label: 'Transactions',  icon: ArrowLeftRight   },
-  { to: '/alerts',        label: 'Fraud Alerts',  icon: AlertTriangle    },
-  { to: '/audit',         label: 'Audit Log',     icon: FileText         },
+  { to: '/alerts',        label: 'Fraud Alerts',  icon: AlertTriangle, roles: ['ANALYST', 'ADMIN'] },
+  { to: '/audit',         label: 'Audit Log',     icon: FileText,      roles: ['ANALYST', 'ADMIN'] },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useAuth()
+  const { user, logout, hasRole } = useAuth()
   const location = useLocation()
-  const navigate = useNavigate()
-
-  const handleLogout = () => {
-    logout()
-    navigate('/login')
-  }
 
   return (
     <div className="flex min-h-screen bg-gray-950">
@@ -27,7 +22,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <span className="text-xl font-bold text-white">FinGuard</span>
         </div>
         <nav className="flex-1 p-4 space-y-1">
-          {navItems.map(({ to, label, icon: Icon }) => {
+          {navItems.filter(({ roles }) => !roles || hasRole(...roles)).map(({ to, label, icon: Icon }) => {
             const active = location.pathname.startsWith(to)
             return (
               <Link
@@ -46,10 +41,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="p-4 border-t border-gray-800">
-          <div className="text-xs text-gray-500 mb-1">{user?.email}</div>
-          <div className="text-xs text-blue-400 mb-3 font-medium">{user?.role}</div>
+          <div className="text-xs text-gray-500 mb-1">{user.email}</div>
+          <div className="text-xs text-blue-400 mb-3 font-medium">{user.role}</div>
           <button
-            onClick={handleLogout}
+            onClick={logout}
             className="flex items-center gap-2 text-sm text-gray-400 hover:text-red-400 transition-colors"
           >
             <LogOut size={16} />

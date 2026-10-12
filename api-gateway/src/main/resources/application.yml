@@ -6,55 +6,61 @@ spring:
     name: api-gateway
   cloud:
     gateway:
+      httpclient:
+        connect-timeout: 5000
+        response-timeout: 30s
       globalcors:
         cors-configurations:
           '[/**]':
-            allowed-origins: "*"
-            allowed-methods: "*"
-            allowed-headers: "*"
-            exposed-headers: "*"
+            # The frontend is served from the same origin via nginx; this only matters for other origins.
+            allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+            allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS
+            allowed-headers: Authorization,Content-Type,Idempotency-Key,X-Correlation-Id,X-Device-Id
+            exposed-headers: X-Correlation-Id,Idempotent-Replayed,Retry-After
+            allow-credentials: true
+            max-age: 3600
+      default-filters:
+        - SecureHeaders
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
       routes:
-        - id: auth-service
-          uri: ${AUTH_SERVICE_URL:http://localhost:8081}
-          predicates:
-            - Path=/api/auth/**
-          filters:
-            - RewritePath=/api/auth/(?<segment>.*), /api/auth/$\{segment}
-
         - id: transaction-service
           uri: ${TRANSACTION_SERVICE_URL:http://localhost:8082}
           predicates:
-            - Path=/api/transactions/**
-          filters:
-            - RewritePath=/api/transactions/(?<segment>.*), /api/transactions/$\{segment}
-
+            - Path=/api/transactions/**,/api/transactions,/api/accounts/**,/api/accounts
         - id: fraud-service
           uri: ${FRAUD_SERVICE_URL:http://localhost:8083}
           predicates:
             - Path=/api/fraud/**
-          filters:
-            - RewritePath=/api/fraud/(?<segment>.*), /api/fraud/$\{segment}
-
         - id: audit-service
           uri: ${AUDIT_SERVICE_URL:http://localhost:8085}
           predicates:
             - Path=/api/audit/**
-          filters:
-            - RewritePath=/api/audit/(?<segment>.*), /api/audit/$\{segment}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:SASL_PLAINTEXT}
+    properties:
+      sasl.mechanism: SCRAM-SHA-512
+      sasl.jaas.config: org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME:}" password="${KAFKA_PASSWORD:}";
     consumer:
-      group-id: api-gateway-sse
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.trusted.packages: "*"
-        spring.json.use.type.headers: false
-        spring.json.value.default.type: java.util.Map
       auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: java.util,java.lang
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: java.util.LinkedHashMap
 
-jwt:
-  secret: ${JWT_SECRET:finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+finguard:
+  security:
+    oidc:
+      issuer: ${OIDC_ISSUER}
+      jwk-set-uri: ${OIDC_JWK_SET_URI}
+      audience: finguard-api
+  gateway:
+    trust-proxy-headers: ${GATEWAY_TRUST_PROXY_HEADERS:false}
+    sse-heartbeat: 15s
 
 logging:
   level:

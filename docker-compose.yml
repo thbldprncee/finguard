@@ -1,21 +1,59 @@
-version: '3.8'
+# Secrets come from .env (run scripts/generate-env.sh). There are no default credentials:
+# compose refuses to start when a required variable is missing.
+#
+# Published: the frontend (:3000, which also serves Keycloak under /auth), the API gateway
+# (127.0.0.1:8080, for `npm run dev`) and the Keycloak admin console (127.0.0.1:8180/auth/admin). Databases, Kafka, Redis and the services are reachable only inside
+# the docker network; docker-compose.dev.yml publishes them on 127.0.0.1 for local debugging.
+
+name: finguard
+
+x-java-service: &java-service
+  restart: on-failure
+  networks: [finguard-net]
+  security_opt: ["no-new-privileges:true"]
+
+x-kafka-env: &kafka-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+
+# Access tokens are issued by Keycloak (RS256). Services verify them with Keycloak's public keys,
+# fetched over the internal network; the issuer is the public URL the browser uses.
+x-oidc-env: &oidc-env
+  OIDC_ISSUER: ${FINGUARD_PUBLIC_URL:-http://localhost:3000}/auth/realms/finguard
+  OIDC_JWK_SET_URI: http://keycloak:8080/auth/realms/finguard/protocol/openid-connect/certs
+
+x-kafka-users-env: &kafka-users-env
+  KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?KAFKA_ADMIN_PASSWORD is not set}
+  KAFKA_TXN_PASSWORD: ${KAFKA_TXN_PASSWORD:?KAFKA_TXN_PASSWORD is not set}
+  KAFKA_FRAUD_PASSWORD: ${KAFKA_FRAUD_PASSWORD:?KAFKA_FRAUD_PASSWORD is not set}
+  KAFKA_NOTIFICATION_PASSWORD: ${KAFKA_NOTIFICATION_PASSWORD:?KAFKA_NOTIFICATION_PASSWORD is not set}
+  KAFKA_AUDIT_PASSWORD: ${KAFKA_AUDIT_PASSWORD:?KAFKA_AUDIT_PASSWORD is not set}
+  KAFKA_GATEWAY_PASSWORD: ${KAFKA_GATEWAY_PASSWORD:?KAFKA_GATEWAY_PASSWORD is not set}
+
+x-backend-deps: &backend-deps
+  postgres:
+    condition: service_healthy
+  kafka-init:
+    condition: service_completed_successfully
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: finguard
-      POSTGRES_PASSWORD: finguard
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run scripts/generate-env.sh}
       POSTGRES_DB: postgres
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is not set - run scripts/generate-env.sh}
+      TXN_DB_PASSWORD: ${TXN_DB_PASSWORD:?TXN_DB_PASSWORD is not set}
+      FRAUD_DB_PASSWORD: ${FRAUD_DB_PASSWORD:?FRAUD_DB_PASSWORD is not set}
+      NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?NOTIFICATION_DB_PASSWORD is not set}
+      AUDIT_DB_PASSWORD: ${AUDIT_DB_PASSWORD:?AUDIT_DB_PASSWORD is not set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
-    ports:
-      - "5432:5432"
-    networks:
-      - finguard-net
+      - ./infra/postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    networks: [finguard-net]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U finguard -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,174 +63,206 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - finguard-net
+    networks: [finguard-net]
+
+  kafka-scram-init:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on: [zookeeper]
+    environment: *kafka-users-env
+    volumes:
+      - ./infra/kafka/create-scram-users.sh:/scripts/create-scram-users.sh:ro
+    entrypoint: ["bash", "/scripts/create-scram-users.sh"]
+    networks: [finguard-net]
+    restart: "no"
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
     depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
+      kafka-scram-init:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_INTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.scram.ScramLoginModule required
+        username="admin" password="${KAFKA_ADMIN_PASSWORD}";
+      KAFKA_LISTENER_NAME_EXTERNAL_SCRAM___SHA___512_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.scram.ScramLoginModule required;
+      KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+      KAFKA_SUPER_USERS: User:admin
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-      KAFKA_LOG_RETENTION_HOURS: 24
-    networks:
-      - finguard-net
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+    networks: [finguard-net]
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/29092'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD:?KAFKA_ADMIN_PASSWORD is not set}
+    volumes:
+      - ./infra/kafka/init-topics-acls.sh:/scripts/init-topics-acls.sh:ro
+    entrypoint: ["bash", "/scripts/init-topics-acls.sh"]
+    networks: [finguard-net]
+    restart: "no"
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    networks:
-      - finguard-net
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is not set}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    networks: [finguard-net]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  auth-service:
-    build: ./auth-service
-    ports:
-      - "8081:8081"
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start", "--import-realm"]
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/auth_db
-      SPRING_DATASOURCE_USERNAME: finguard
-      SPRING_DATASOURCE_PASSWORD: finguard
-      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
-      JWT_EXPIRATION_MS: 86400000
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak_db
+      KC_DB_USERNAME: keycloak_svc
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /auth
+      # Browser-facing URL (via the frontend nginx). It is also the token issuer.
+      KC_HOSTNAME: ${FINGUARD_PUBLIC_URL:-http://localhost:3000}/auth
+      # The admin console is not exposed through nginx, only on localhost.
+      KC_HOSTNAME_ADMIN: http://localhost:8180/auth
+      # Services reach Keycloak as http://keycloak:8080 for the JWKS.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is not set}
+      # Placeholders in the imported realm file
+      KEYCLOAK_SSL_REQUIRED: ${KEYCLOAK_SSL_REQUIRED:-external}
+      FINGUARD_PUBLIC_URL: ${FINGUARD_PUBLIC_URL:-http://localhost:3000}
+      FINGUARD_ADMIN_EMAIL: ${FINGUARD_ADMIN_EMAIL:-admin@finguard.local}
+      FINGUARD_ADMIN_PASSWORD: ${FINGUARD_ADMIN_PASSWORD:?FINGUARD_ADMIN_PASSWORD is not set}
+    volumes:
+      - ./infra/keycloak/finguard-realm.json:/opt/keycloak/data/import/finguard-realm.json:ro
+    ports:
+      - "127.0.0.1:8180:8080"
     depends_on:
       postgres:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-    networks:
-      - finguard-net
-    restart: on-failure
+    networks: [finguard-net]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   transaction-service:
+    <<: *java-service
     build: ./transaction-service
-    ports:
-      - "8082:8082"
     environment:
+      <<: [*kafka-env, *oidc-env]
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/transaction_db
-      SPRING_DATASOURCE_USERNAME: finguard
-      SPRING_DATASOURCE_PASSWORD: finguard
-      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    networks:
-      - finguard-net
-    restart: on-failure
+      SPRING_DATASOURCE_USERNAME: transaction_svc
+      SPRING_DATASOURCE_PASSWORD: ${TXN_DB_PASSWORD}
+      KAFKA_USERNAME: transaction-service
+      KAFKA_PASSWORD: ${KAFKA_TXN_PASSWORD}
+    depends_on: *backend-deps
 
   fraud-detection-service:
+    <<: *java-service
     build: ./fraud-detection-service
-    ports:
-      - "8083:8083"
     environment:
+      <<: [*kafka-env, *oidc-env]
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/fraud_db
-      SPRING_DATASOURCE_USERNAME: finguard
-      SPRING_DATASOURCE_PASSWORD: finguard
-      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATASOURCE_USERNAME: fraud_svc
+      SPRING_DATASOURCE_PASSWORD: ${FRAUD_DB_PASSWORD}
+      KAFKA_USERNAME: fraud-detection-service
+      KAFKA_PASSWORD: ${KAFKA_FRAUD_PASSWORD}
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: 6379
-      FRAUD_RULE_HIGH_AMOUNT_THRESHOLD: 10000
-      FRAUD_RULE_VELOCITY_MAX_TX: 5
-      FRAUD_RULE_VELOCITY_WINDOW_MINUTES: 10
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
     depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
+      <<: *backend-deps
       redis:
         condition: service_healthy
-    networks:
-      - finguard-net
-    restart: on-failure
 
   notification-service:
+    <<: *java-service
     build: ./notification-service
-    ports:
-      - "8084:8084"
     environment:
+      <<: *kafka-env
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notification_db
-      SPRING_DATASOURCE_USERNAME: finguard
-      SPRING_DATASOURCE_PASSWORD: finguard
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    networks:
-      - finguard-net
-    restart: on-failure
+      SPRING_DATASOURCE_USERNAME: notification_svc
+      SPRING_DATASOURCE_PASSWORD: ${NOTIFICATION_DB_PASSWORD}
+      KAFKA_USERNAME: notification-service
+      KAFKA_PASSWORD: ${KAFKA_NOTIFICATION_PASSWORD}
+    depends_on: *backend-deps
 
   audit-service:
+    <<: *java-service
     build: ./audit-service
-    ports:
-      - "8085:8085"
     environment:
+      <<: [*kafka-env, *oidc-env]
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/audit_db
-      SPRING_DATASOURCE_USERNAME: finguard
-      SPRING_DATASOURCE_PASSWORD: finguard
-      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-    networks:
-      - finguard-net
-    restart: on-failure
+      SPRING_DATASOURCE_USERNAME: audit_svc
+      SPRING_DATASOURCE_PASSWORD: ${AUDIT_DB_PASSWORD}
+      KAFKA_USERNAME: audit-service
+      KAFKA_PASSWORD: ${KAFKA_AUDIT_PASSWORD}
+    depends_on: *backend-deps
 
   api-gateway:
+    <<: *java-service
     build: ./api-gateway
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      JWT_SECRET: ${JWT_SECRET:-finguard-super-secret-jwt-key-for-dev-use-only-32chars}
-      AUTH_SERVICE_URL: http://auth-service:8081
+      <<: [*kafka-env, *oidc-env]
+      KAFKA_USERNAME: api-gateway
+      KAFKA_PASSWORD: ${KAFKA_GATEWAY_PASSWORD}
       TRANSACTION_SERVICE_URL: http://transaction-service:8082
       FRAUD_SERVICE_URL: http://fraud-detection-service:8083
       AUDIT_SERVICE_URL: http://audit-service:8085
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # The gateway sits behind the frontend nginx, which sets X-Real-IP.
+      GATEWAY_TRUST_PROXY_HEADERS: "true"
     depends_on:
-      - auth-service
-      - transaction-service
-      - fraud-detection-service
-      - audit-service
-    networks:
-      - finguard-net
-    restart: on-failure
+      kafka-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+      transaction-service:
+        condition: service_started
+      fraud-detection-service:
+        condition: service_started
+      audit-service:
+        condition: service_started
 
   frontend:
     build: ./frontend
     ports:
-      - "3000:80"
-    depends_on:
-      - api-gateway
-    networks:
-      - finguard-net
+      - "3000:8080"
+    depends_on: [api-gateway, keycloak]
+    networks: [finguard-net]
+    security_opt: ["no-new-privileges:true"]
 
 volumes:
   postgres_data:

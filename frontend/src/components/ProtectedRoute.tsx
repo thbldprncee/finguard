@@ -7,11 +7,9 @@ interface Props {
   roles?: UserRole[]
 }
 
+/** UI convenience only: every API call is authorised again by the backend. */
 export default function ProtectedRoute({ children, roles }: Props) {
-  const { isAuthenticated, hasRole } = useAuth()
-
-  if (!isAuthenticated) return <Navigate to="/login" replace />
+  const { hasRole } = useAuth()
   if (roles && !hasRole(...roles)) return <Navigate to="/dashboard" replace />
-
   return <>{children}</>
 }

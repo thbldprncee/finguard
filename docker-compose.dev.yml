@@ -1,0 +1,24 @@
+# Local debugging only:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Publishes infrastructure and services on 127.0.0.1 and enables Swagger UI.
+# Kafka on localhost:9092 still requires SCRAM credentials from .env.
+
+x-swagger: &swagger
+  SWAGGER_ENABLED: "true"
+
+services:
+  postgres:
+    ports: ["127.0.0.1:5432:5432"]
+  redis:
+    ports: ["127.0.0.1:6379:6379"]
+  kafka:
+    ports: ["127.0.0.1:9092:9092"]
+  transaction-service:
+    ports: ["127.0.0.1:8082:8082"]
+    environment: *swagger
+  fraud-detection-service:
+    ports: ["127.0.0.1:8083:8083"]
+    environment: *swagger
+  audit-service:
+    ports: ["127.0.0.1:8085:8085"]
+    environment: *swagger

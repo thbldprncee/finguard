@@ -1,48 +1,49 @@
 package com.finguard.fraud.rule.impl;
 
+import com.finguard.fraud.config.FraudProperties;
 import com.finguard.fraud.rule.FraudRuleEvaluator;
 import com.finguard.fraud.rule.RuleContext;
 import com.finguard.fraud.rule.RuleResult;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-
+/**
+ * The key stores the id of the first transaction seen from the device. Re-analysing that same
+ * transaction (Kafka re-delivery) still reports "new device" instead of flipping to "known".
+ */
 @Component
 public class NewDeviceRule implements FraudRuleEvaluator {
 
-    private final StringRedisTemplate redisTemplate;
-    private final int score;
+    public static final String CODE = "NEW_DEVICE";
 
-    public NewDeviceRule(
-            StringRedisTemplate redisTemplate,
-            @Value("${fraud.rules.new-device.score:15}") int score) {
-        this.redisTemplate = redisTemplate;
-        this.score = score;
+    private final StringRedisTemplate redis;
+    private final FraudProperties.NewDevice settings;
+
+    public NewDeviceRule(StringRedisTemplate redis, FraudProperties properties) {
+        this.redis = redis;
+        this.settings = properties.rules().newDevice();
     }
 
     @Override
     public String getRuleCode() {
-        return "NEW_DEVICE";
+        return CODE;
     }
 
     @Override
     public RuleResult evaluate(RuleContext ctx) {
         if (ctx.getDeviceId() == null || ctx.getDeviceId().isBlank()) {
-            return RuleResult.notTriggered(getRuleCode());
+            return settings.treatMissingAsRisky()
+                    ? RuleResult.triggered(CODE, "Transaction without a device id")
+                    : RuleResult.notTriggered(CODE);
         }
 
-        String key = "known_device:" + ctx.getUserId() + ":" + ctx.getDeviceId();
-        Boolean isKnown = redisTemplate.hasKey(key);
-
-        if (Boolean.FALSE.equals(isKnown)) {
-            redisTemplate.opsForValue().set(key, "1", Duration.ofDays(30));
-            return RuleResult.triggered(getRuleCode(), score,
-                    "Transaction from new device: " + ctx.getDeviceId());
+        String key = "fraud:device:" + ctx.getUserId() + ":" + ctx.getDeviceId();
+        String txId = ctx.getTransactionId().toString();
+        Boolean firstSeen = redis.opsForValue().setIfAbsent(key, txId, settings.memory());
+        if (Boolean.TRUE.equals(firstSeen) || txId.equals(redis.opsForValue().get(key))) {
+            return RuleResult.triggered(CODE, "Transaction from a new device");
         }
-
-        redisTemplate.expire(key, Duration.ofDays(30));
-        return RuleResult.notTriggered(getRuleCode());
+        redis.expire(key, settings.memory());
+        return RuleResult.notTriggered(CODE);
     }
 }

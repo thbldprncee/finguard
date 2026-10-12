@@ -1,13 +1,15 @@
 server:
   port: 8082
+  error:
+    include-message: never
 
 spring:
   application:
     name: transaction-service
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/transaction_db}
-    username: ${SPRING_DATASOURCE_USERNAME:finguard}
-    password: ${SPRING_DATASOURCE_PASSWORD:finguard}
+    username: ${SPRING_DATASOURCE_USERNAME:transaction_svc}
+    password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -15,36 +17,61 @@ spring:
     properties:
       hibernate:
         default_schema: txn
-        dialect: org.hibernate.dialect.PostgreSQLDialect
     open-in-view: false
   flyway:
     locations: classpath:db/migration
     schemas: txn
     default-schema: txn
+  data:
+    web:
+      pageable:
+        max-page-size: 100
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:SASL_PLAINTEXT}
+    properties:
+      sasl.mechanism: SCRAM-SHA-512
+      sasl.jaas.config: org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_USERNAME:}" password="${KAFKA_PASSWORD:}";
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
       properties:
         spring.json.add.type.headers: false
+        enable.idempotence: true
+        delivery.timeout.ms: 30000
+        request.timeout.ms: 10000
     consumer:
       group-id: transaction-service
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.trusted.packages: "*"
-        spring.json.use.type.headers: false
-        spring.json.value.default.type: java.util.Map
       auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # A record that is not valid JSON goes to the DLT instead of blocking the partition forever.
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: java.util,java.lang
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: java.util.LinkedHashMap
 
-jwt:
-  secret: ${JWT_SECRET:finguard-super-secret-jwt-key-for-dev-use-only-32chars}
+finguard:
+  security:
+    oidc:
+      # No defaults: the service refuses to start without knowing whom to trust.
+      issuer: ${OIDC_ISSUER}
+      jwk-set-uri: ${OIDC_JWK_SET_URI}
+      audience: finguard-api
+  transactions:
+    supported-currencies: USD,EUR,GBP,CHF
+    max-amount: 1000000
+    idempotency-key-ttl: 24h
 
 springdoc:
   api-docs:
+    enabled: ${SWAGGER_ENABLED:false}
     path: /api-docs
   swagger-ui:
+    enabled: ${SWAGGER_ENABLED:false}
     path: /swagger-ui.html
 
 logging:

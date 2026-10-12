@@ -16,10 +16,15 @@ public class AuditService {
 
     @Transactional(readOnly = true)
     public Page<AuditEventResponse> getEvents(String eventType, String aggregateId, Pageable pageable) {
-        if (eventType != null) {
+        boolean byType = eventType != null && !eventType.isBlank();
+        boolean byAggregate = aggregateId != null && !aggregateId.isBlank();
+        if (byType && byAggregate) {
+            return auditEventRepository.findByEventTypeAndAggregateId(eventType, aggregateId, pageable).map(AuditEventResponse::from);
+        }
+        if (byType) {
             return auditEventRepository.findByEventType(eventType, pageable).map(AuditEventResponse::from);
         }
-        if (aggregateId != null) {
+        if (byAggregate) {
             return auditEventRepository.findByAggregateId(aggregateId, pageable).map(AuditEventResponse::from);
         }
         return auditEventRepository.findAll(pageable).map(AuditEventResponse::from);
