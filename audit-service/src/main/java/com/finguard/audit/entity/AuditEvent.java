@@ -23,8 +23,14 @@ public class AuditEvent {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    /** X-Event-Id from the producer's outbox; unique, so a re-delivered event is stored once. */
+    @Column(unique = true)
+    private UUID eventId;
+
     @Column(nullable = false)
     private String eventType;
+
+    private String topic;
 
     private String aggregateId;
 

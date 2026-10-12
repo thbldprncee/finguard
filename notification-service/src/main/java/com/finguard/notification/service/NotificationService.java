@@ -1,6 +1,7 @@
 package com.finguard.notification.service;
 
 import com.finguard.notification.entity.Notification;
+import com.finguard.notification.exception.MalformedEventException;
 import com.finguard.notification.repository.NotificationRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,40 +18,46 @@ public class NotificationService {
 
     private final NotificationRepository notificationRepository;
 
+    /** Idempotent: a re-delivered event does not notify the user twice (also enforced by a unique index). */
     @Transactional
-    public void processfraudResult(Map<String, Object> event) {
-        String transactionId = (String) event.get("transactionId");
-        String userId = (String) event.get("userId");
-        String decision = (String) event.get("decision");
-        int riskScore = ((Number) event.get("riskScore")).intValue();
-
+    public void processFraudResult(Map<String, Object> event) {
+        String decision = String.valueOf(event.get("decision"));
         if ("APPROVED".equals(decision)) {
             return;
         }
+        String type = switch (decision) {
+            case "REVIEW_REQUIRED" -> "FRAUD_REVIEW";
+            case "BLOCKED" -> "FRAUD_BLOCKED";
+            default -> throw new MalformedEventException("Unknown decision: " + decision);
+        };
+        UUID transactionId = uuid(event, "transactionId");
+        UUID userId = uuid(event, "userId");
 
-        String type = "REVIEW_REQUIRED".equals(decision) ? "FRAUD_REVIEW" : "FRAUD_BLOCKED";
-        String message = buildMessage(transactionId, decision, riskScore);
+        if (notificationRepository.existsByTransactionIdAndType(transactionId, type)) {
+            log.info("Notification {} for tx={} already sent, skipping duplicate", type, transactionId);
+            return;
+        }
 
-        Notification notification = Notification.builder()
-                .userId(UUID.fromString(userId))
-                .transactionId(UUID.fromString(transactionId))
+        String message = "BLOCKED".equals(decision)
+                ? String.format("Transaction %s has been blocked for your protection. Contact support if this was a legitimate transaction.", transactionId)
+                : String.format("Transaction %s is being reviewed by our team. We will notify you of the outcome.", transactionId);
+
+        notificationRepository.save(Notification.builder()
+                .userId(userId)
+                .transactionId(transactionId)
                 .type(type)
                 .message(message)
                 .status("SENT")
-                .build();
+                .build());
 
-        notificationRepository.save(notification);
-
-        log.info("[NOTIFY] {} to user {}: {}", type, userId, message);
+        log.info("[NOTIFY] {} to user {} for tx {}", type, userId, transactionId);
     }
 
-    private String buildMessage(String txId, String decision, int score) {
-        return switch (decision) {
-            case "REVIEW_REQUIRED" ->
-                String.format("Transaction %s requires manual review. Risk score: %d. Our team will investigate.", txId, score);
-            case "BLOCKED" ->
-                String.format("Transaction %s has been BLOCKED due to high fraud risk score: %d. Contact support if this was a legitimate transaction.", txId, score);
-            default -> String.format("Transaction %s status: %s", txId, decision);
-        };
+    private static UUID uuid(Map<String, Object> event, String field) {
+        try {
+            return UUID.fromString(String.valueOf(event.get(field)));
+        } catch (IllegalArgumentException e) {
+            throw new MalformedEventException("Invalid " + field + ": " + event.get(field));
+        }
     }
 }
