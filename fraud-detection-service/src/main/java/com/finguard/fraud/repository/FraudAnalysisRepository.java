@@ -6,6 +6,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -14,6 +15,10 @@ public interface FraudAnalysisRepository extends JpaRepository<FraudAnalysis, UU
     Optional<FraudAnalysis> findByTransactionId(UUID transactionId);
 
     boolean existsByTransactionId(UUID transactionId);
+
+    /** Blocked transactions of a user created in [from, to): PostgreSQL is the source of truth. */
+    long countByUserIdAndDecisionAndTransactionOccurredAtGreaterThanEqualAndTransactionOccurredAtLessThan(
+            UUID userId, FraudAnalysis.Decision decision, Instant from, Instant to);
 
     @Query("""
             SELECT fa FROM FraudAnalysis fa

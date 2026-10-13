@@ -19,13 +19,18 @@ import java.util.stream.Collectors;
 /**
  * Rule thresholds. Whether a rule is enabled and how much it adds to the risk score
  * live in the fraud_rules table (changeable at runtime via PATCH /api/fraud/rules/{id}).
+ *
+ * maxEventLateness: how late (by creation time) an event may still be analysed correctly.
+ * Retry topics can deliver a user's events out of order; windowed rule state is kept
+ * this much longer than the window itself so a late event still finds its history.
  */
 @Validated
 @ConfigurationProperties("finguard.fraud")
 public record FraudProperties(
         @Valid @DefaultValue Decision decision,
         @Valid @DefaultValue Rules rules,
-        @NotNull @DefaultValue("30s") Duration ruleConfigRefreshInterval
+        @NotNull @DefaultValue("30s") Duration ruleConfigRefreshInterval,
+        @NotNull @DefaultValue("1h") Duration maxEventLateness
 ) {
 
     /**

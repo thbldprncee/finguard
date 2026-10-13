@@ -123,6 +123,24 @@ class FraudPipelineIntegrationTest {
     }
 
     @Test
+    void blockedHistoryComesFromPostgres_soTheNextTransactionSeesIt() {
+        UUID userId = UUID.randomUUID();
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        send(userId, event(first, userId, "15000", "GAMBLING"));
+        await().atMost(Duration.ofSeconds(30)).until(() -> analysisRepository.findByTransactionId(first).isPresent());
+        FraudAnalysis firstAnalysis = analysisRepository.findByTransactionId(first).orElseThrow();
+        firstAnalysis.setDecision(FraudAnalysis.Decision.BLOCKED); // force a block for the history check
+        analysisRepository.save(firstAnalysis);
+
+        Map<String, Object> next = event(second, userId, "10", "RETAIL");
+        next.put("occurredAt", Instant.parse("2026-05-01T13:00:00Z").toString());
+        send(userId, next);
+        await().atMost(Duration.ofSeconds(30)).until(() -> analysisRepository.findByTransactionId(second).isPresent());
+        assertThat(analysisRepository.findByTransactionId(second).orElseThrow().getTriggeredRules()).contains("REPEATED_BLOCKED");
+    }
+
+    @Test
     void malformedEvent_endsInReviewViaDeadLetter_insteadOfStayingPending() {
         UUID txId = UUID.randomUUID();
         UUID userId = UUID.randomUUID();

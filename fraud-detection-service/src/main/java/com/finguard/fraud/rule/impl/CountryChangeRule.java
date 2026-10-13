@@ -4,16 +4,17 @@ import com.finguard.fraud.config.FraudProperties;
 import com.finguard.fraud.rule.FraudRuleEvaluator;
 import com.finguard.fraud.rule.RuleContext;
 import com.finguard.fraud.rule.RuleResult;
-import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
+import java.util.Set;
 
 /**
- * Remembers the last transaction id with its country and the country before it, so that
- * re-analysing the same transaction compares against the same previous country.
- * Events are keyed by userId, so one user's transactions are analysed sequentially.
+ * Compares with the country of the user's previous transaction by creation time, not by
+ * processing order: transactions are kept in a sorted set (member = "transactionId|country",
+ * score = creation time). A late event (retry topic, outbox retry) is compared with its real
+ * predecessor, and a re-delivered event finds the same predecessor again.
  */
 @Component
 public class CountryChangeRule implements FraudRuleEvaluator {
@@ -35,21 +36,32 @@ public class CountryChangeRule implements FraudRuleEvaluator {
 
     @Override
     public RuleResult evaluate(RuleContext ctx) {
-        String key = "fraud:country:" + ctx.getUserId();
-        String txId = ctx.getTransactionId().toString();
-        HashOperations<String, String, String> hash = redis.opsForHash();
-        Map<String, String> state = hash.entries(key);
+        String key = "fraud:countries:" + ctx.getUserId();
+        long at = ctx.getOccurredAt().toEpochMilli();
+        String self = ctx.getTransactionId() + "|" + ctx.getCountry();
+        ZSetOperations<String, String> zset = redis.opsForZSet();
 
-        String previous = txId.equals(state.get("lastTx")) ? state.get("previous") : state.get("country");
-        hash.putAll(key, Map.of(
-                "lastTx", txId,
-                "country", ctx.getCountry(),
-                "previous", previous == null ? "" : previous));
+        zset.add(key, self, at);
+        zset.removeRangeByScore(key, Double.NEGATIVE_INFINITY, at - settings.memory().toMillis());
         redis.expire(key, settings.memory());
 
-        if (previous != null && !previous.isEmpty() && !previous.equalsIgnoreCase(ctx.getCountry())) {
+        String previous = previousCountry(zset, key, at, self);
+        if (previous != null && !previous.equalsIgnoreCase(ctx.getCountry())) {
             return RuleResult.triggered(CODE, String.format("Country changed from %s to %s", previous, ctx.getCountry()));
         }
         return RuleResult.notTriggered(CODE);
+    }
+
+    /** Latest transaction created before this one (same-millisecond entries other than itself count too). */
+    private static String previousCountry(ZSetOperations<String, String> zset, String key, long at, String self) {
+        Set<String> candidates = zset.reverseRangeByScore(key, Double.NEGATIVE_INFINITY, at, 0, 2);
+        if (candidates == null) {
+            return null;
+        }
+        return candidates.stream()
+                .filter(member -> !member.equals(self))
+                .findFirst()
+                .map(member -> member.substring(member.lastIndexOf('|') + 1))
+                .orElse(null);
     }
 }
