@@ -117,17 +117,59 @@ class RedisRulesIntegrationTest {
     }
 
     @Test
-    void repeatedBlocked_countsRecordedBlocksOnce() {
-        var rule = new RepeatedBlockedTransactionsRule(redis, props);
+    void countryChange_comparesWithPredecessorByCreationTime_notByProcessingOrder() {
+        var rule = new CountryChangeRule(redis, props);
         UUID user = UUID.randomUUID();
-        UUID blockedTx = UUID.randomUUID();
-        Instant t0 = Instant.now();
+        Instant t0 = Instant.parse("2026-05-01T10:00:00Z");
+        RuleContext usAt1000 = tx(user, UUID.randomUUID(), t0, "1", "US", null);
+        RuleContext deAt1001 = tx(user, UUID.randomUUID(), t0.plusSeconds(60), "1", "DE", null);
 
-        rule.recordBlocked(user, blockedTx, t0);
-        rule.recordBlocked(user, blockedTx, t0);
+        // The 10:01 transaction is processed first (the 10:00 one was waiting for a retry).
+        assertThat(rule.evaluate(deAt1001).triggered()).as("no history yet").isFalse();
+        assertThat(rule.evaluate(usAt1000).triggered()).as("10:00 has no predecessor").isFalse();
+        // Re-delivery of 10:01 now sees its real predecessor (US at 10:00).
+        assertThat(rule.evaluate(deAt1001).reason()).isEqualTo("Country changed from US to DE");
+    }
 
-        RuleResult next = rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(60), "1", "US", null));
-        assertThat(next.triggered()).isTrue();
-        assertThat(next.reason()).startsWith("1 blocked");
+    @Test
+    void newDevice_firstTransactionByCreationTime_isTheNewOne_evenIfProcessedLater() {
+        var rule = new NewDeviceRule(redis, props);
+        UUID user = UUID.randomUUID();
+        Instant t0 = Instant.parse("2026-05-01T10:00:00Z");
+        RuleContext earlier = tx(user, UUID.randomUUID(), t0, "1", "US", "device-late0001");
+        RuleContext later = tx(user, UUID.randomUUID(), t0.plusSeconds(60), "1", "US", "device-late0001");
+
+        assertThat(rule.evaluate(later).triggered()).as("processed first, earliest seen so far").isTrue();
+        assertThat(rule.evaluate(earlier).triggered()).as("really the first transaction from the device").isTrue();
+        assertThat(rule.evaluate(later).triggered()).as("re-delivery: no longer the earliest").isFalse();
+    }
+
+    @Test
+    void velocity_lateEventStillCountsItsWindow() {
+        var rule = new VelocityRule(redis, props);
+        UUID user = UUID.randomUUID();
+        Instant t0 = Instant.parse("2026-05-01T12:00:00Z");
+        for (int i = 1; i <= 3; i++) {
+            rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(i), "1", "US", null));
+        }
+        // A much newer event must not purge entries a late event still needs.
+        rule.evaluate(tx(user, UUID.randomUUID(), t0.plus(Duration.ofMinutes(30)), "1", "US", null));
+
+        RuleResult late = rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(4), "1", "US", null));
+        assertThat(late.triggered()).isTrue();
+        assertThat(late.reason()).startsWith("4 transactions");
+    }
+
+    @Test
+    void structuring_ignoresAmountsAboveTheThreshold() {
+        var rule = new StructuringRule(redis, props);
+        UUID user = UUID.randomUUID();
+        Instant t0 = Instant.parse("2026-05-01T12:00:00Z");
+
+        assertThat(rule.evaluate(tx(user, UUID.randomUUID(), t0, "50000", "US", null)).triggered())
+                .as("a large payment is HIGH_AMOUNT's job").isFalse();
+        assertThat(rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(60), "100", "US", null)).triggered()).isFalse();
+        assertThat(rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(120), "100", "US", null)).triggered())
+                .as("3 transactions, but only 200 below the threshold").isFalse();
     }
 }

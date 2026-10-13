@@ -16,7 +16,6 @@ import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
@@ -53,13 +52,17 @@ public class TransactionStatusConsumer {
             default -> throw new MalformedEventException("Unknown fraud decision: " + payload.get("decision"));
         };
 
-        // Idempotent: a duplicate delivery or a late older event changes nothing.
-        int updated = transactionRepository.applyDecision(transactionId, newStatus, Instant.now());
-        if (updated == 1) {
-            log.info("Updated transaction {} status to {}", transactionId, newStatus);
-        } else {
-            log.info("Ignored decision {} for transaction {}: not found or already decided", newStatus, transactionId);
-        }
+        // The transaction's current state decides whether the decision applies (State pattern);
+        // @Version turns a concurrent update into a retry instead of a lost write.
+        transactionRepository.findById(transactionId).ifPresentOrElse(
+                tx -> {
+                    if (tx.applyFraudDecision(newStatus)) {
+                        log.info("Updated transaction {} status to {}", transactionId, newStatus);
+                    } else {
+                        log.info("Ignored decision {} for transaction {} in state {}", newStatus, transactionId, tx.getStatus());
+                    }
+                },
+                () -> log.warn("Transaction {} not found for decision {}", transactionId, newStatus));
     }
 
     @DltHandler

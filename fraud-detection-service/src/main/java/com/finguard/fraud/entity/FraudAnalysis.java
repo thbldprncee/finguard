@@ -27,6 +27,9 @@ public class FraudAnalysis {
     /** Owner of the transaction, used to restrict what a USER may read. */
     private UUID userId;
 
+    /** When the transaction was created; history rules look back from this, not from analysis time. */
+    private Instant transactionOccurredAt;
+
     @Column(nullable = false)
     private int riskScore;
 

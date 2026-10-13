@@ -5,12 +5,15 @@ import com.finguard.transaction.dto.CreateTransactionRequest;
 import com.finguard.transaction.entity.Account;
 import com.finguard.transaction.entity.IdempotencyKey;
 import com.finguard.transaction.entity.Transaction;
+import com.finguard.transaction.event.TransactionCreated;
 import com.finguard.transaction.exception.BusinessRuleException;
 import com.finguard.transaction.exception.IdempotencyKeyReuseException;
 import com.finguard.transaction.repository.IdempotencyKeyRepository;
 import com.finguard.transaction.repository.TransactionRepository;
 import com.finguard.transaction.security.AuthenticatedUser;
 import com.finguard.transaction.security.RequestMetadata;
+import com.finguard.transaction.validation.TransactionValidator;
+import com.finguard.transaction.validation.ValidationRules;
 import jakarta.persistence.EntityNotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,9 +23,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -39,7 +44,7 @@ class TransactionServiceTest {
     @Mock TransactionRepository transactionRepository;
     @Mock IdempotencyKeyRepository idempotencyKeyRepository;
     @Mock AccountService accountService;
-    @Mock TransactionEvents transactionEvents;
+    @Mock ApplicationEventPublisher events;
 
     TransactionService transactionService;
 
@@ -49,9 +54,14 @@ class TransactionServiceTest {
 
     @BeforeEach
     void setUp() {
+        var properties = new TransactionProperties(Set.of("USD", "EUR"), new BigDecimal("1000000"), Duration.ofHours(24), 5);
+        var validator = new TransactionValidator(List.of(
+                new ValidationRules.SupportedCurrency(properties),
+                new ValidationRules.CurrencyMatchesAccount(),
+                new ValidationRules.AmountWithinLimit(properties),
+                new ValidationRules.DistinctAccounts()));
         transactionService = new TransactionService(transactionRepository, idempotencyKeyRepository,
-                accountService, transactionEvents,
-                new TransactionProperties(Set.of("USD", "EUR"), new BigDecimal("1000000"), Duration.ofHours(24), 5));
+                accountService, validator, events, properties);
         when(accountService.requireOwnedActive("FG0000000000000001", userId)).thenReturn(account);
         when(transactionRepository.save(any())).thenAnswer(inv -> {
             Transaction tx = inv.getArgument(0);
@@ -79,7 +89,7 @@ class TransactionServiceTest {
         assertThat(saved.getValue().getDeviceId()).isEqualTo("device-12345678");
         assertThat(result.replayed()).isFalse();
         assertThat(result.transaction().status()).isEqualTo("PENDING");
-        verify(transactionEvents).created(any(), eq("corr-1"));
+        verify(events).publishEvent(argThat((Object e) -> e instanceof TransactionCreated tc && "corr-1".equals(tc.correlationId())));
     }
 
     @Test
@@ -109,7 +119,26 @@ class TransactionServiceTest {
         assertThat(result.replayed()).isTrue();
         assertThat(result.transaction().id()).isEqualTo(existingTxId);
         verify(transactionRepository, never()).save(any());
-        verify(transactionEvents, never()).created(any(), any());
+        verify(events, never()).publishEvent(any(Object.class));
+    }
+
+    @Test
+    void replay_doesNotRevalidate_soAFrozenAccountStillGetsTheOriginalResult() {
+        UUID existingTxId = UUID.randomUUID();
+        Transaction existing = Transaction.builder().id(existingTxId).userId(userId).externalTransactionId("e")
+                .sourceAccount("FG0000000000000001").targetAccount("ACC-002").amount(BigDecimal.TEN)
+                .currency("USD").country("US").paymentMethod("CARD").status(Transaction.Status.PENDING).build();
+        when(idempotencyKeyRepository.insertIfAbsent(any(), any(), any(), any(), any())).thenReturn(0);
+        when(idempotencyKeyRepository.findByUserIdAndIdempotencyKey(userId, "key-12345678"))
+                .thenReturn(Optional.of(IdempotencyKey.builder().requestHash(TransactionService.requestHash(request("10")))
+                        .transactionId(existingTxId).build()));
+        when(transactionRepository.findById(existingTxId)).thenReturn(Optional.of(existing));
+        when(accountService.requireOwnedActive(any(), any())).thenThrow(new BusinessRuleException("Source account is not active"));
+
+        var result = transactionService.createTransaction(request("10"), userId, meta("key-12345678"));
+
+        assertThat(result.replayed()).isTrue();
+        verify(accountService, never()).requireOwnedActive(any(), any());
     }
 
     @Test

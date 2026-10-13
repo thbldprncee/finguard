@@ -1,16 +1,17 @@
 package com.finguard.fraud.service;
 
 import com.finguard.fraud.config.FraudProperties;
+import com.finguard.fraud.decision.DecisionConfig;
+import com.finguard.fraud.decision.DecisionMaker;
+import com.finguard.fraud.event.FraudAnalysisCompleted;
 import com.finguard.fraud.entity.FraudAnalysis;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
 import com.finguard.fraud.repository.FraudRuleRepository;
 import com.finguard.fraud.rule.RuleResult;
 import com.finguard.fraud.rule.TestFraudProperties;
 import com.finguard.fraud.rule.TransactionEvent;
-import com.finguard.fraud.rule.impl.RepeatedBlockedTransactionsRule;
 import com.finguard.fraud.security.AuthenticatedUser;
 import jakarta.persistence.EntityNotFoundException;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,7 +20,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -39,29 +40,26 @@ import static org.mockito.Mockito.*;
 class FraudAnalysisServiceTest {
 
     @Mock RuleEngineService ruleEngineService;
-    @Mock RuleConfigService ruleConfigService;
     @Mock FraudAnalysisRepository analysisRepository;
     @Mock FraudRuleRepository ruleRepository;
-    @Mock FraudEvents fraudEvents;
-    @Mock RepeatedBlockedTransactionsRule repeatedBlockedRule;
+    @Mock ApplicationEventPublisher events;
 
     private final UUID txId = UUID.randomUUID();
     private final UUID userId = UUID.randomUUID();
 
     @BeforeEach
     void setUp() {
-        TransactionSynchronizationManager.initSynchronization();
         when(analysisRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
     }
 
-    @AfterEach
-    void tearDown() {
-        TransactionSynchronizationManager.clearSynchronization();
+    private FraudAnalysisService service(FraudProperties properties) {
+        var decisionMaker = new DecisionMaker(properties, new DecisionConfig().ruleFailurePolicy(properties));
+        return new FraudAnalysisService(ruleEngineService, decisionMaker, analysisRepository, ruleRepository, events);
     }
 
-    private FraudAnalysisService service(FraudProperties properties) {
-        return new FraudAnalysisService(ruleEngineService, ruleConfigService, analysisRepository, ruleRepository,
-                fraudEvents, repeatedBlockedRule, properties);
+    private void verifyPublished(FraudAnalysis analysis, String correlationId) {
+        verify(events).publishEvent(argThat((Object e) -> e instanceof FraudAnalysisCompleted c
+                && c.analysis() == analysis && java.util.Objects.equals(c.correlationId(), correlationId)));
     }
 
     private TransactionEvent event() {
@@ -81,7 +79,7 @@ class FraudAnalysisServiceTest {
 
         service(TestFraudProperties.defaults()).analyzeTransaction(event(), "c");
 
-        verifyNoInteractions(ruleEngineService, fraudEvents);
+        verifyNoInteractions(ruleEngineService, events);
         verify(analysisRepository, never()).saveAndFlush(any());
     }
 
@@ -95,7 +93,8 @@ class FraudAnalysisServiceTest {
         FraudAnalysis analysis = savedAnalysis();
         assertThat(analysis.getDecision()).isEqualTo(FraudAnalysis.Decision.APPROVED);
         assertThat(analysis.getUserId()).isEqualTo(userId);
-        verify(fraudEvents).analysisCompleted(analysis, "corr");
+        assertThat(analysis.getTransactionOccurredAt()).isNotNull();
+        verifyPublished(analysis, "corr");
     }
 
     @Test
@@ -140,7 +139,7 @@ class FraudAnalysisServiceTest {
         FraudAnalysis analysis = savedAnalysis();
         assertThat(analysis.getDecision()).isEqualTo(FraudAnalysis.Decision.REVIEW_REQUIRED);
         assertThat(analysis.getFailedRules()).containsExactly("ENGINE");
-        verify(fraudEvents).analysisCompleted(eq(analysis), eq("c"));
+        verifyPublished(analysis, "c");
     }
 
     @Test

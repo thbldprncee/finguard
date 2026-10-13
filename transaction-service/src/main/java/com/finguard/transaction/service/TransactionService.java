@@ -6,15 +6,17 @@ import com.finguard.transaction.dto.TransactionResponse;
 import com.finguard.transaction.entity.Account;
 import com.finguard.transaction.entity.IdempotencyKey;
 import com.finguard.transaction.entity.Transaction;
-import com.finguard.transaction.exception.BusinessRuleException;
+import com.finguard.transaction.event.TransactionCreated;
 import com.finguard.transaction.exception.IdempotencyKeyReuseException;
 import com.finguard.transaction.repository.IdempotencyKeyRepository;
 import com.finguard.transaction.repository.TransactionRepository;
 import com.finguard.transaction.security.AuthenticatedUser;
 import com.finguard.transaction.security.RequestMetadata;
+import com.finguard.transaction.validation.TransactionValidator;
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -37,7 +39,8 @@ public class TransactionService {
     private final TransactionRepository transactionRepository;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final AccountService accountService;
-    private final TransactionEvents transactionEvents;
+    private final TransactionValidator validator;
+    private final ApplicationEventPublisher events;
     private final TransactionProperties properties;
 
     /** @param replayed true when an earlier result was returned for the same Idempotency-Key */
@@ -47,12 +50,13 @@ public class TransactionService {
      * The transaction row, the idempotency key and the outbox event are written in one database
      * transaction: either all three are committed or none. The Kafka publish happens later from
      * the outbox, so a broker outage cannot leave a transaction that the fraud engine never sees.
+     * <p>
+     * The idempotency key is handled before any validation: a retry returns the original result
+     * even if the account was frozen in between. A rejected request rolls back its key claim,
+     * so the client may retry after fixing the problem.
      */
     @Transactional
     public CreateResult createTransaction(CreateTransactionRequest request, UUID userId, RequestMetadata meta) {
-        Account source = accountService.requireOwnedActive(request.sourceAccount(), userId);
-        validate(request, source);
-
         String requestHash = requestHash(request);
         String key = meta.idempotencyKey();
         if (key != null) {
@@ -61,6 +65,9 @@ public class TransactionService {
                 return replay(userId, key, requestHash);
             }
         }
+
+        Account source = accountService.requireOwnedActive(request.sourceAccount(), userId);
+        validator.validate(request, source);
 
         Transaction transaction = transactionRepository.save(Transaction.builder()
                 .externalTransactionId(UUID.randomUUID().toString())
@@ -80,7 +87,7 @@ public class TransactionService {
         if (key != null) {
             idempotencyKeyRepository.attachTransaction(userId, key, transaction.getId());
         }
-        transactionEvents.created(transaction, meta.correlationId());
+        events.publishEvent(new TransactionCreated(transaction, meta.correlationId()));
         log.info("Created transaction: id={}, userId={}", transaction.getId(), userId);
 
         return new CreateResult(TransactionResponse.from(transaction), false);
@@ -125,21 +132,6 @@ public class TransactionService {
                 .orElseThrow(() -> new IllegalStateException("Idempotency record found but transaction missing"));
         log.info("Idempotent replay: userId={}, txId={}", userId, tx.getId());
         return new CreateResult(TransactionResponse.from(tx), true);
-    }
-
-    private void validate(CreateTransactionRequest request, Account source) {
-        if (!properties.supportedCurrencies().contains(request.currency())) {
-            throw new BusinessRuleException("Unsupported currency: " + request.currency());
-        }
-        if (!source.getCurrency().equals(request.currency())) {
-            throw new BusinessRuleException("Currency does not match the source account currency " + source.getCurrency());
-        }
-        if (request.amount().compareTo(properties.maxAmount()) > 0) {
-            throw new BusinessRuleException("Amount exceeds the maximum of " + properties.maxAmount().toPlainString());
-        }
-        if (source.getAccountNumber().equals(request.targetAccount())) {
-            throw new BusinessRuleException("Source and target accounts must differ");
-        }
     }
 
     static String requestHash(CreateTransactionRequest r) {

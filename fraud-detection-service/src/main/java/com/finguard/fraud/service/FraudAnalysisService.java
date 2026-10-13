@@ -1,26 +1,27 @@
 package com.finguard.fraud.service;
 
-import com.finguard.fraud.config.FraudProperties;
+import com.finguard.fraud.decision.DecisionMaker;
 import com.finguard.fraud.dto.FraudAnalysisResponse;
 import com.finguard.fraud.dto.FraudRuleUpdateRequest;
 import com.finguard.fraud.entity.FraudAnalysis;
 import com.finguard.fraud.entity.FraudRule;
+import com.finguard.fraud.event.FraudAnalysisCompleted;
+import com.finguard.fraud.event.FraudRuleUpdated;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
 import com.finguard.fraud.repository.FraudRuleRepository;
 import com.finguard.fraud.rule.RuleResult;
 import com.finguard.fraud.rule.TransactionEvent;
-import com.finguard.fraud.rule.impl.RepeatedBlockedTransactionsRule;
 import com.finguard.fraud.security.AuthenticatedUser;
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -32,18 +33,17 @@ import java.util.UUID;
 public class FraudAnalysisService {
 
     private final RuleEngineService ruleEngineService;
-    private final RuleConfigService ruleConfigService;
+    private final DecisionMaker decisionMaker;
     private final FraudAnalysisRepository fraudAnalysisRepository;
     private final FraudRuleRepository fraudRuleRepository;
-    private final FraudEvents fraudEvents;
-    private final RepeatedBlockedTransactionsRule repeatedBlockedRule;
-    private final FraudProperties properties;
+    private final ApplicationEventPublisher events;
 
     /**
      * Idempotent consumer: Kafka delivers at least once, so the same transaction may arrive again.
      * An existing analysis means the decision and its outbox event are already committed.
-     * The rules themselves are idempotent per transaction id as well (see the Redis-based rules),
-     * so a retry after a failed commit produces the same result.
+     * The rules are idempotent per transaction id as well, so a retry after a failed commit
+     * produces the same result. Blocked-history is read from fraud_analyses itself, so it is
+     * exactly as durable as the decisions (no separate after-commit write that could be lost).
      */
     @Transactional
     public void analyzeTransaction(TransactionEvent event, String correlationId) {
@@ -54,11 +54,7 @@ public class FraudAnalysisService {
 
         RuleEngineService.Evaluation evaluation = ruleEngineService.evaluate(event.toRuleContext());
         List<RuleResult> failed = evaluation.failed();
-
-        FraudAnalysis.Decision decision = decisionForScore(evaluation.riskScore());
-        if (!failed.isEmpty()) {
-            decision = decision.atLeast(failurePolicyDecision());
-        }
+        FraudAnalysis.Decision decision = decisionMaker.decide(evaluation);
 
         List<String> reasons = new ArrayList<>(evaluation.triggered().stream().map(RuleResult::reason).toList());
         if (!failed.isEmpty()) {
@@ -69,17 +65,15 @@ public class FraudAnalysisService {
         FraudAnalysis analysis = fraudAnalysisRepository.saveAndFlush(FraudAnalysis.builder()
                 .transactionId(event.transactionId())
                 .userId(event.userId())
+                .transactionOccurredAt(event.occurredAt())
                 .riskScore(evaluation.riskScore())
                 .decision(decision)
                 .triggeredRules(evaluation.triggered().stream().map(RuleResult::ruleCode).toArray(String[]::new))
                 .failedRules(failed.stream().map(RuleResult::ruleCode).toArray(String[]::new))
                 .explanation(reasons.isEmpty() ? "No suspicious patterns detected" : String.join("; ", reasons))
                 .build());
-        fraudEvents.analysisCompleted(analysis, correlationId);
+        events.publishEvent(new FraudAnalysisCompleted(analysis, correlationId));
 
-        if (decision == FraudAnalysis.Decision.BLOCKED) {
-            afterCommit(() -> repeatedBlockedRule.recordBlocked(event.userId(), event.transactionId(), event.occurredAt()));
-        }
         log.info("Fraud analysis complete: txId={}, score={}, decision={}, failedRules={}",
                 event.transactionId(), evaluation.riskScore(), decision, failed.size());
     }
@@ -103,17 +97,18 @@ public class FraudAnalysisService {
             return;
         }
 
-        FraudAnalysis.Decision decision = failurePolicyDecision();
+        FraudAnalysis.Decision decision = decisionMaker.forFailedAnalysis();
         FraudAnalysis analysis = fraudAnalysisRepository.saveAndFlush(FraudAnalysis.builder()
                 .transactionId(transactionId)
                 .userId(userId)
+                .transactionOccurredAt(parseInstant(rawEvent.get("occurredAt")))
                 .riskScore(0)
                 .decision(decision)
                 .triggeredRules(new String[0])
                 .failedRules(new String[]{"ENGINE"})
                 .explanation("Automatic analysis failed (" + error + ") - decision set to " + decision)
                 .build());
-        fraudEvents.analysisCompleted(analysis, correlationId);
+        events.publishEvent(new FraudAnalysisCompleted(analysis, correlationId));
         log.warn("Transaction {} could not be analysed, decision {} by failure policy", transactionId, decision);
     }
 
@@ -142,35 +137,17 @@ public class FraudAnalysisService {
         if (request.weight() != null) rule.setWeight(request.weight());
 
         FraudRule saved = fraudRuleRepository.save(rule);
-        fraudEvents.ruleUpdated(saved, oldEnabled, oldWeight, actorId, correlationId);
-        afterCommit(ruleConfigService::reload);
+        events.publishEvent(new FraudRuleUpdated(saved, oldEnabled, oldWeight, actorId, correlationId));
         log.info("Fraud rule {} updated by {}: enabled {} -> {}, weight {} -> {}",
                 rule.getCode(), actorId, oldEnabled, rule.isEnabled(), oldWeight, rule.getWeight());
         return saved;
     }
 
-    private FraudAnalysis.Decision decisionForScore(int score) {
-        if (score >= properties.decision().blockThreshold()) return FraudAnalysis.Decision.BLOCKED;
-        if (score >= properties.decision().reviewThreshold()) return FraudAnalysis.Decision.REVIEW_REQUIRED;
-        return FraudAnalysis.Decision.APPROVED;
-    }
-
-    private FraudAnalysis.Decision failurePolicyDecision() {
-        return properties.decision().onRuleFailure() == FraudProperties.FailurePolicy.BLOCK
-                ? FraudAnalysis.Decision.BLOCKED
-                : FraudAnalysis.Decision.REVIEW_REQUIRED;
-    }
-
-    private static void afterCommit(Runnable action) {
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                try {
-                    action.run();
-                } catch (RuntimeException e) {
-                    log.error("After-commit action failed: {}", e.getMessage(), e);
-                }
-            }
-        });
+    private static Instant parseInstant(Object value) {
+        try {
+            return value != null ? Instant.parse(value.toString()) : Instant.now();
+        } catch (RuntimeException e) {
+            return Instant.now();
+        }
     }
 }

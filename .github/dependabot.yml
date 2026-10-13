@@ -1,9 +1,20 @@
 version: 2
+
+# One grouped PR per ecosystem and directory instead of one PR per dependency.
+# Major versions of libraries, base images and frontend packages are ignored: they need a
+# deliberate migration (e.g. Java 25, Gradle 9, React 19, Tailwind 4, springdoc 3).
 updates:
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
+    groups:
+      frontend:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: gradle
     directories:
       - /api-gateway
@@ -13,6 +24,13 @@ updates:
       - /audit-service
     schedule:
       interval: weekly
+    groups:
+      gradle:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: docker
     directories:
       - /api-gateway
@@ -23,7 +41,17 @@ updates:
       - /frontend
     schedule:
       interval: monthly
+    groups:
+      docker-images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]

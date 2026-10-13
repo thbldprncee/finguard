@@ -1,15 +1,22 @@
 package com.finguard.transaction.service;
 
 import com.finguard.transaction.entity.Transaction;
+import com.finguard.transaction.event.TransactionCreated;
 import com.finguard.transaction.outbox.OutboxMessage;
 import com.finguard.transaction.outbox.OutboxWriter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * Observer of domain events: turns them into outbox rows. BEFORE_COMMIT runs inside the
+ * business transaction, so the outbox row commits or rolls back together with the transaction.
+ */
 @Component
 @RequiredArgsConstructor
 public class TransactionEvents {
@@ -22,7 +29,12 @@ public class TransactionEvents {
      * Keyed by userId, not transactionId: all events of one user land in one partition and are
      * processed in order, which the per-user fraud rules (velocity, country change) depend on.
      */
-    public void created(Transaction tx, String correlationId) {
+    @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
+    public void on(TransactionCreated event) {
+        created(event.transaction(), event.correlationId());
+    }
+
+    void created(Transaction tx, String correlationId) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("transactionId", tx.getId().toString());
         payload.put("externalTransactionId", tx.getExternalTransactionId());

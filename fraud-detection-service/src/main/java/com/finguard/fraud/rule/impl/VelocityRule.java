@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
  * Re-delivery of the same event re-adds the same member, so it is counted once
  * (an INCR counter would count every delivery). A fixed INCR+EXPIRE window also resets
  * at its boundary, letting 2x the limit through around it; the sliding window does not.
+ * The count covers (creation time - window, creation time], so it is the same whatever order
+ * the events are processed in; entries are kept for window + max lateness for late events.
  */
 @Component
 public class VelocityRule implements FraudRuleEvaluator {
@@ -21,10 +23,12 @@ public class VelocityRule implements FraudRuleEvaluator {
 
     private final StringRedisTemplate redis;
     private final FraudProperties.Velocity settings;
+    private final long retentionMillis;
 
     public VelocityRule(StringRedisTemplate redis, FraudProperties properties) {
         this.redis = redis;
         this.settings = properties.rules().velocity();
+        this.retentionMillis = settings.window().plus(properties.maxEventLateness()).toMillis();
     }
 
     @Override
@@ -40,9 +44,9 @@ public class VelocityRule implements FraudRuleEvaluator {
         ZSetOperations<String, String> zset = redis.opsForZSet();
 
         zset.add(key, ctx.getTransactionId().toString(), at);
-        zset.removeRangeByScore(key, Double.NEGATIVE_INFINITY, windowStart);
+        zset.removeRangeByScore(key, Double.NEGATIVE_INFINITY, at - retentionMillis);
         Long count = zset.count(key, windowStart + 1, at);
-        redis.expire(key, settings.window().multipliedBy(2));
+        redis.expire(key, java.time.Duration.ofMillis(retentionMillis * 2));
 
         if (count != null && count > settings.maxTransactions()) {
             return RuleResult.triggered(CODE, String.format("%d transactions within %d minutes (max %d)",

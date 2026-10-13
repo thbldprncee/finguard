@@ -156,7 +156,7 @@ Each rule reports whether it fired and why. The score it adds is its **weight fr
 |------|---------|---------------|
 | `HIGH_AMOUNT` | Amount above the per-currency threshold (USD 10 000, EUR 9 000, …) | +30 |
 | `VELOCITY` | More than 5 transactions in a sliding 10-minute window | +25 |
-| `STRUCTURING` | ≥ 3 transactions in 24 h, each below the threshold, together above it | +25 |
+| `STRUCTURING` | ≥ 3 transactions in 24 h, each at or below the threshold, together above it (larger ones are left to `HIGH_AMOUNT`) | +25 |
 | `REPEATED_BLOCKED` | User had a blocked transaction in the last 24 hours | +25 |
 | `COUNTRY_CHANGE` | Country differs from the user's previous transaction | +20 |
 | `SUSPICIOUS_MERCHANT` | Merchant category `GAMBLING`, `CRYPTO` or `ADULT` | +20 |
@@ -177,7 +177,16 @@ If any rule cannot be evaluated, the decision is raised to at least `REVIEW_REQU
 
 ### Idempotency under at-least-once delivery
 
-Kafka may deliver an event more than once. Fraud Detection skips transactions that already have an analysis, and the Redis-backed rules are idempotent per transaction id (sorted sets keyed by transaction id for velocity, structuring and blocked history; "first transaction seen" for devices; "previous country" remembered per transaction). A re-delivered event therefore yields the same score and is counted once.
+Kafka may deliver an event more than once. Fraud Detection skips transactions that already have an analysis, and the Redis-backed rules are idempotent per transaction id (sorted-set members are transaction ids). A re-delivered event therefore yields the same score and is counted once.
+
+### Event order
+
+Two layers keep a user's history consistent:
+
+1. **The outbox publishes each key in creation order.** The relay only picks the oldest unpublished event of every message key; if it fails, later events of that user wait for it, while other users keep flowing. Events are keyed by user id, so they stay in one partition.
+2. **The rules do not depend on processing order anyway**, because retry topics can still reorder events. Every history is indexed by the transaction's creation time: velocity and structuring count the window that ends at the transaction, `COUNTRY_CHANGE` compares with the previous transaction *by creation time*, `NEW_DEVICE` flags the earliest transaction from a device (a Lua script keeps the minimum), and windowed state is kept `max-event-lateness` (1 h) longer than the window. A late event is scored as if it had arrived on time; a transaction that was already scored is not re-scored.
+
+`REPEATED_BLOCKED` counts `BLOCKED` decisions in PostgreSQL, so a committed block is always part of the history (there is no separate Redis copy that could be lost).
 
 ---
 
@@ -307,6 +316,9 @@ finguard/
 **Why a Transactional Outbox?**
 `@Transactional` does not span PostgreSQL and Kafka. Saving a transaction and then calling `kafkaTemplate.send()` can commit the row while the event is lost (or publish an event for a row that is rolled back). The outbox row is written in the same database transaction; a relay polls with `FOR UPDATE SKIP LOCKED` and publishes. Delivery becomes at-least-once, which is why every consumer is idempotent.
 
+**Why handle the idempotency key before validation?**
+A retry must return the original result even if something changed in between (the account was frozen). Validation runs only for the first request; a rejected request rolls back its key claim, so the client can retry after fixing the problem.
+
 **Why claim the idempotency key with `INSERT … ON CONFLICT DO NOTHING`?**
 "Check if the key exists, then insert" lets two concurrent requests both pass the check. The unique index makes the second insert wait for the first transaction and then report the conflict, so exactly one request creates the transaction and the other returns it. Keys are scoped per user and bound to a hash of the request.
 
@@ -315,3 +327,18 @@ Password storage, brute-force protection, refresh-token rotation, revocation and
 
 **Why fail-safe rules?**
 For an anti-fraud system, "the check could not run" must never look like "the check passed".
+
+---
+
+## Design Patterns
+
+| Pattern | Where | Why |
+|---------|-------|-----|
+| **Transactional Outbox** | `outbox/` in transaction- and fraud-service | Atomic state change + event without distributed transactions |
+| **Idempotent Consumer** | `FraudAnalysisService`, `NotificationService`, `AuditEventConsumer`, Redis rules | At-least-once delivery without duplicate effects |
+| **Strategy** | `FraudRuleEvaluator` (one class per rule), `RuleFailurePolicy` (`ReviewOnFailure` / `BlockOnFailure`) | New rules or failure behaviour without touching the engine |
+| **Chain of Responsibility** | `validation/TransactionValidationRule` links run by `TransactionValidator` | Each business check is a separate, ordered, testable link |
+| **State** | `Transaction.Status` (`PENDING` accepts a decision, `REVIEW_REQUIRED` waits for an analyst, final states ignore events) | Transitions live in one place; replayed events cannot flip a status |
+| **Observer (domain events)** | `TransactionCreated`, `FraudAnalysisCompleted`, `FraudRuleUpdated` + `@TransactionalEventListener` | Domain services do not know about Kafka; the outbox listener runs `BEFORE_COMMIT`, the rule cache reload `AFTER_COMMIT` |
+| **Adapter** | `KeycloakJwtConverter` | Maps Keycloak tokens to the application's `AuthenticatedUser` |
+| **Factory Method** | `RuleResult.triggered/notTriggered/failed/disabled`, `DecisionConfig` | Valid objects only; strategy chosen once from configuration |

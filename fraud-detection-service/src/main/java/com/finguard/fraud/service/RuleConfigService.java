@@ -2,11 +2,14 @@ package com.finguard.fraud.service;
 
 import com.finguard.fraud.config.FraudProperties;
 import com.finguard.fraud.entity.FraudRule;
+import com.finguard.fraud.event.FraudRuleUpdated;
 import com.finguard.fraud.repository.FraudRuleRepository;
 import com.finguard.fraud.rule.FraudRuleEvaluator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.time.Instant;
 import java.util.List;
@@ -63,6 +66,12 @@ public class RuleConfigService implements SmartInitializingSingleton {
             }
         }
         return settings;
+    }
+
+    /** After the change is committed, so the reload sees it; other instances pick it up on refresh. */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onRuleUpdated(FraudRuleUpdated event) {
+        reload();
     }
 
     public synchronized void reload() {
