@@ -66,7 +66,54 @@ public class Transaction {
     @UpdateTimestamp
     private Instant updatedAt;
 
+    /**
+     * Applies an automated fraud decision; returns false when the current state ignores it.
+     * Duplicate or out-of-order Kafka events are therefore harmless.
+     */
+    public boolean applyFraudDecision(Status decision) {
+        Status next = status.onFraudDecision(decision);
+        if (next == status) {
+            return false;
+        }
+        status = next;
+        return true;
+    }
+
+    /**
+     * State pattern: each status decides how it reacts to an event instead of callers
+     * scattering "if status == PENDING" checks.
+     * <ul>
+     *   <li>PENDING accepts the fraud engine's decision;</li>
+     *   <li>REVIEW_REQUIRED waits for an analyst, a (replayed) automated decision cannot change it;</li>
+     *   <li>APPROVED and BLOCKED are final.</li>
+     * </ul>
+     */
     public enum Status {
-        PENDING, APPROVED, REVIEW_REQUIRED, BLOCKED
+        PENDING {
+            @Override
+            Status onFraudDecision(Status decision) {
+                return requireDecision(decision);
+            }
+        },
+        REVIEW_REQUIRED,
+        APPROVED,
+        BLOCKED;
+
+        /** Default for every state except PENDING: ignore automated decisions. */
+        Status onFraudDecision(Status decision) {
+            requireDecision(decision);
+            return this;
+        }
+
+        public boolean isFinal() {
+            return this == APPROVED || this == BLOCKED;
+        }
+
+        private static Status requireDecision(Status decision) {
+            if (decision == null || decision == PENDING) {
+                throw new IllegalArgumentException("Not a fraud decision: " + decision);
+            }
+            return decision;
+        }
     }
 }

@@ -1,7 +1,11 @@
 package com.finguard.transaction.integration;
 
 import com.finguard.transaction.dto.CreateTransactionRequest;
+import com.finguard.transaction.entity.Account;
 import com.finguard.transaction.entity.Transaction;
+import com.finguard.transaction.kafka.TransactionStatusConsumer;
+import com.finguard.transaction.outbox.OutboxEvent;
+import com.finguard.transaction.repository.AccountRepository;
 import com.finguard.transaction.exception.IdempotencyKeyReuseException;
 import com.finguard.transaction.outbox.OutboxEventRepository;
 import com.finguard.transaction.repository.TransactionRepository;
@@ -62,6 +66,8 @@ class TransactionIntegrationTest {
     @Autowired TransactionRepository transactionRepository;
     @Autowired OutboxEventRepository outboxEventRepository;
     @Autowired TransactionTemplate tx;
+    @Autowired TransactionStatusConsumer statusConsumer;
+    @Autowired AccountRepository accountRepository;
 
     private CreateTransactionRequest request(String account, String amount) {
         return new CreateTransactionRequest(account, "ACC-EXTERNAL-1", new BigDecimal(amount), "USD", "US", "RETAIL", "CARD");
@@ -164,13 +170,49 @@ class TransactionIntegrationTest {
     }
 
     @Test
-    void decisionIsAppliedOnlyOnce() {
+    void decisionIsAppliedOnlyOnce_viaConsumer() {
         UUID userId = UUID.randomUUID();
         String account = accountService.open(userId, "USD").accountNumber();
         UUID txId = transactionService.createTransaction(request(account, "5"), userId, meta(null)).transaction().id();
 
-        assertThat(tx.<Integer>execute(s -> transactionRepository.applyDecision(txId, Transaction.Status.BLOCKED, Instant.now()))).isEqualTo(1);
-        assertThat(tx.<Integer>execute(s -> transactionRepository.applyDecision(txId, Transaction.Status.APPROVED, Instant.now()))).isZero();
+        statusConsumer.onFraudAnalysisCompleted(Map.of("transactionId", txId.toString(), "decision", "BLOCKED"));
+        statusConsumer.onFraudAnalysisCompleted(Map.of("transactionId", txId.toString(), "decision", "APPROVED"));
+
         assertThat(transactionRepository.findById(txId).orElseThrow().getStatus()).isEqualTo(Transaction.Status.BLOCKED);
+    }
+
+    @Test
+    void idempotentReplay_succeedsEvenAfterTheAccountWasFrozen() {
+        UUID userId = UUID.randomUUID();
+        var opened = accountService.open(userId, "USD");
+        String key = "frozen-" + UUID.randomUUID();
+        var first = transactionService.createTransaction(request(opened.accountNumber(), "12"), userId, meta(key));
+
+        tx.executeWithoutResult(s -> accountRepository.findById(opened.id()).orElseThrow().setStatus(Account.Status.FROZEN));
+
+        var retry = transactionService.createTransaction(request(opened.accountNumber(), "12"), userId, meta(key));
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.transaction().id()).isEqualTo(first.transaction().id());
+    }
+
+    @Test
+    void outboxRelay_neverOvertakesAnUnpublishedEventOfTheSameKey() {
+        String key = "user-" + UUID.randomUUID();
+        Instant now = Instant.now();
+        OutboxEvent waitingForRetry = outboxEvent(key, now.minusSeconds(10), now.plusSeconds(3600));
+        OutboxEvent later = outboxEvent(key, now.minusSeconds(5), now.minusSeconds(5));
+        OutboxEvent otherKey = outboxEvent("user-" + UUID.randomUUID(), now.minusSeconds(5), now.minusSeconds(5));
+        outboxEventRepository.saveAll(List.of(waitingForRetry, later, otherKey));
+
+        List<UUID> due = tx.execute(s -> outboxEventRepository.lockNextBatch(Instant.now(), 100).stream().map(OutboxEvent::getId).toList());
+
+        assertThat(due).contains(otherKey.getId()).doesNotContain(later.getId(), waitingForRetry.getId());
+        outboxEventRepository.deleteAll(List.of(waitingForRetry, later, otherKey));
+    }
+
+    private OutboxEvent outboxEvent(String key, Instant createdAt, Instant nextAttemptAt) {
+        return OutboxEvent.builder().id(UUID.randomUUID()).aggregateType("TEST").aggregateId(key).eventType("TEST")
+                .topic("test.ordering").messageKey(key).payload(Map.of("k", key)).createdAt(createdAt)
+                .nextAttemptAt(nextAttemptAt).attempts(0).build();
     }
 }

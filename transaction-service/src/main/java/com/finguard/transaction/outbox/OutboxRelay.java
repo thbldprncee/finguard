@@ -33,11 +33,12 @@ public class OutboxRelay {
     private final TransactionTemplate transactionTemplate;
     private final OutboxProperties properties;
 
+    /** Each batch holds at most one event per key, so keep going while batches make progress. */
     public void publishPending() {
         Integer published;
         do {
             published = transactionTemplate.execute(status -> publishBatch());
-        } while (published != null && published == properties.batchSize());
+        } while (published != null && published > 0);
     }
 
     @Transactional
@@ -62,9 +63,8 @@ public class OutboxRelay {
                 markFailed(event, e);
                 break;
             } catch (Exception e) {
+                // Only this key waits: its later events are not selected until this one is published.
                 markFailed(event, e);
-                // Stop the batch: later events may share the key and must not overtake this one.
-                break;
             }
         }
         return published;
