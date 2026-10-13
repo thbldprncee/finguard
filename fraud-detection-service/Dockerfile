@@ -1,4 +1,4 @@
-FROM gradle:8.8-jdk21-alpine AS build
+FROM gradle:8.14-jdk21-alpine AS build
 WORKDIR /app
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 RUN gradle dependencies --no-daemon -q 2>/dev/null || true
