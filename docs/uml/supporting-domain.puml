@@ -1,0 +1,34 @@
+@startuml supporting-domain
+!include style.iuml
+
+package "notification-service" {
+  class Notification {
+    userId : UUID
+    transactionId : UUID
+    type : FRAUD_REVIEW | FRAUD_BLOCKED
+    message : String
+    status : String
+    createdAt : Instant
+  }
+}
+package "audit-service" {
+  class AuditEvent {
+    eventId : UUID  {unique}
+    eventType : String
+    topic : String
+    aggregateId : String
+    payload : Map<String, Object>
+    correlationId : String
+    createdAt : Instant
+  }
+}
+
+note bottom of Notification
+  one notification per transaction and type;
+  APPROVED decisions produce none
+end note
+note bottom of AuditEvent
+  every domain event stored once,
+  deduplicated by X-Event-Id
+end note
+@enduml

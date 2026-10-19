@@ -1,0 +1,38 @@
+@startuml create-transaction
+!include style.iuml
+autonumber
+
+actor Customer
+participant "React SPA" as Spa
+participant "Keycloak" as Kc
+participant "API Gateway" as Gw
+participant "transaction-service" as Tx
+database "transactions DB" as Db
+
+Customer -> Spa : sign in
+Spa -> Kc : Authorization Code + PKCE
+Kc --> Spa : access token (RS256), kept in memory only
+
+Customer -> Spa : send money
+Spa -> Gw : POST /api/transactions\nBearer token · Idempotency-Key · X-Device-Id
+Gw -> Gw : validate JWT (JWKS, iss, aud)\ndrop client X-User-* / X-Client-Ip\nadd X-Client-Ip, X-Correlation-Id
+Gw -> Tx : forward
+activate Tx
+Tx -> Tx : validate token again
+Tx -> Db : BEGIN
+Tx -> Db : INSERT idempotency key\nON CONFLICT DO NOTHING
+alt key is new
+  Tx -> Db : source account belongs to the caller?
+  Tx -> Db : INSERT transaction (PENDING)
+  Tx -> Db : INSERT outbox event transaction.created
+  Tx -> Db : attach transaction to the key
+  Tx -> Db : COMMIT
+  Tx --> Spa : 201 Created {status: PENDING}
+else same key, same body
+  Tx -> Db : load the original transaction
+  Tx --> Spa : 200 · Idempotent-Replayed: true
+else same key, different body
+  Tx --> Spa : 422 Unprocessable Entity
+end
+deactivate Tx
+@enduml

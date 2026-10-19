@@ -1,0 +1,24 @@
+@startuml outbox-relay
+!include style.iuml
+hide empty description
+left to right direction
+
+state "Unpublished" as New : written with the\nbusiness change
+state "Waiting for retry" as Retry : attempts + 1,\nnextAttemptAt = now + backoff
+state "Published" as Published : publishedAt set
+state "Deleted" as Deleted
+
+[*] --> New
+New --> Published : relay picks the oldest\nevent of its key, Kafka acks
+New --> Retry : send failed
+Retry --> Published : retry succeeded
+Retry --> Retry : failed again
+Published --> Deleted : retention expired\n(cleanup job)
+Deleted --> [*]
+
+note bottom of Retry
+  later events with the same key (user id)
+  wait for this one, other keys keep flowing:
+  per-user order is preserved
+end note
+@enduml

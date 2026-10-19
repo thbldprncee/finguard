@@ -1,0 +1,47 @@
+@startuml fraud-analysis-flow
+!include style.iuml
+autonumber
+
+participant "transaction-service" as Tx
+queue "Kafka" as K
+participant "fraud-detection-service" as Fraud
+database "Redis" as Redis
+participant "notification-service" as Notify
+participant "audit-service" as Audit
+participant "API Gateway" as Gw
+actor "Browser (SSE)" as Browser
+
+Tx -> K : outbox relay: transaction.created\n(key = user id, oldest event per key first)
+par
+  K -> Fraud : transaction.created
+  activate Fraud
+  Fraud -> Fraud : already analysed? → skip
+  Fraud -> Redis : windowed rule state\n(velocity, structuring, devices…)
+  Fraud -> Fraud : 8 rules → weighted score\n→ decision (failure policy if a rule failed)
+  Fraud -> Fraud : save FraudAnalysis\n+ outbox event (one transaction)
+  deactivate Fraud
+else
+  K -> Audit : store event once
+else
+  K -> Gw : forward to subscribers
+  Gw -> Browser : "transaction created"
+end
+
+Fraud -> K : outbox relay: fraud.analysis.completed
+par
+  K -> Tx : PENDING → decision (once)
+else
+  K -> Notify : FRAUD_REVIEW / FRAUD_BLOCKED notification
+else
+  K -> Audit : store event once
+else
+  K -> Gw : forward
+  Gw -> Browser : decision (staff: with rule details;\ncustomer: own transactions only)
+end
+
+note over K
+  each consumer has its own retry and DLT topics;
+  after retries the DLT handler records the
+  failure-policy decision, so nothing stays PENDING
+end note
+@enduml

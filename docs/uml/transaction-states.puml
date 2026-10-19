@@ -1,0 +1,18 @@
+@startuml transaction-states
+!include style.iuml
+hide empty description
+left to right direction
+
+state "Pending" as PENDING
+state "Review required" as REVIEW : waits for an analyst
+state "Approved" as APPROVED
+state "Blocked" as BLOCKED
+
+[*] --> PENDING : transaction created
+PENDING --> APPROVED : score 0–39
+PENDING --> REVIEW : score 40–69\nor a rule failed
+PENDING --> BLOCKED : score 70–100
+REVIEW --> REVIEW : replayed automated\ndecision is ignored
+APPROVED --> [*]
+BLOCKED --> [*]
+@enduml

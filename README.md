@@ -202,6 +202,114 @@ Every record carries `X-Event-Id`, `X-Event-Type` and `X-Correlation-Id` headers
 
 ---
 
+## UML Diagrams
+
+All diagrams are [PlantUML](https://plantuml.com) sources in [`docs/uml`](docs/uml), rendered to SVG next to them; click a title to expand it. To re-render after a change:
+
+```bash
+docker run --rm -v "$PWD/docs/uml":/data -w /data plantuml/plantuml:1.2024.7 -tsvg *.puml
+```
+
+#### Requirements
+
+<details>
+<summary><b>Use cases: customer, fraud analyst, administrator</b></summary>
+<br/>
+
+![Use cases](docs/uml/use-case.svg)
+
+</details>
+
+#### Architecture
+
+<details>
+<summary><b>Services, Kafka topics, databases, Keycloak</b></summary>
+<br/>
+
+![Architecture](docs/uml/architecture.svg)
+
+</details>
+
+#### Domain model
+
+<details>
+<summary><b>transaction-service: accounts, transactions, idempotency, outbox</b></summary>
+<br/>
+
+![transaction-service domain](docs/uml/transaction-domain.svg)
+
+</details>
+
+<details>
+<summary><b>fraud-detection-service: analyses, rules and the rule engine</b></summary>
+<br/>
+
+![fraud-detection-service domain](docs/uml/fraud-domain.svg)
+
+</details>
+
+<details>
+<summary><b>notification-service and audit-service</b></summary>
+<br/>
+
+![Supporting services](docs/uml/supporting-domain.svg)
+
+</details>
+
+#### Interactions
+
+<details>
+<summary><b>Sign-in and creating a transaction with an Idempotency-Key</b></summary>
+<br/>
+
+![Create transaction](docs/uml/create-transaction.svg)
+
+</details>
+
+<details>
+<summary><b>From transaction.created to a decision on every screen</b></summary>
+<br/>
+
+![Fraud analysis flow](docs/uml/fraud-analysis-flow.svg)
+
+</details>
+
+<details>
+<summary><b>Changing a fraud rule: audit and reload</b></summary>
+<br/>
+
+![Rule administration](docs/uml/rule-administration.svg)
+
+</details>
+
+#### Decisions and lifecycles
+
+<details>
+<summary><b>How a fraud decision is made</b></summary>
+<br/>
+
+![Fraud decision](docs/uml/fraud-decision.svg)
+
+</details>
+
+<details>
+<summary><b>Transaction status</b></summary>
+<br/>
+
+![Transaction states](docs/uml/transaction-states.svg)
+
+</details>
+
+<details>
+<summary><b>Outbox event: publishing, retries, per-key order</b></summary>
+<br/>
+
+![Outbox relay](docs/uml/outbox-relay.svg)
+
+</details>
+
+---
+
 ## API Reference
 
 All requests go through nginx (`http://localhost:3000/api/...`) with `Authorization: Bearer <access token>` issued by Keycloak.
@@ -305,6 +413,7 @@ finguard/
 │   ├── keycloak/               # Realm import: roles, client, brute-force and token settings
 │   ├── kafka/                  # SCRAM users, topics, ACLs
 │   └── postgres/               # One database and role per service
+├── docs/uml/                   # PlantUML sources + rendered SVG diagrams
 ├── scripts/                    # generate-env.sh, gradle-docker.sh
 └── docker-compose.yml
 ```

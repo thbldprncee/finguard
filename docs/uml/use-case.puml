@@ -1,0 +1,43 @@
+@startuml use-case
+!include style.iuml
+left to right direction
+skinparam linetype ortho
+skinparam ranksep 90
+
+actor "Customer\n(USER)" as User
+actor "Fraud analyst\n(ANALYST)" as Analyst
+actor "Administrator\n(ADMIN)" as Admin
+
+rectangle "FinGuard" {
+  usecase "Sign in / register\n(Keycloak)" as Login
+  usecase "Open an account" as OpenAccount
+  usecase "Create a\ntransaction" as CreateTx
+  usecase "View own\ntransactions" as OwnTx
+  usecase "See the fraud\ndecision" as Decision
+  usecase "Watch the\nlive feed (SSE)" as Live
+  usecase "View all transactions\nand full analyses" as AllTx
+  usecase "Review fraud alerts\n(REVIEW / BLOCKED)" as Alerts
+  usecase "View fraud rules\nand weights" as Rules
+  usecase "Browse the\naudit trail" as Audit
+  usecase "Enable / disable a rule,\nchange its weight" as EditRule
+}
+
+User --> Login
+User --> OpenAccount
+User --> CreateTx
+User --> OwnTx
+User --> Decision
+User --> Live
+
+Analyst --> AllTx
+Analyst --> Alerts
+Analyst --> Rules
+Analyst --> Audit
+Analyst --> Live
+
+Admin --> EditRule
+Admin --> Rules
+
+Admin -|> Analyst
+CreateTx ..> Login : <<include>>
+@enduml

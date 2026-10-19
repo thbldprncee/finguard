@@ -1,0 +1,84 @@
+@startuml transaction-domain
+!include style.iuml
+
+class Account {
+  id : UUID
+  accountNumber : String
+  userId : UUID
+  currency : String
+  status : Account.Status
+  createdAt : Instant
+}
+enum "Account.Status" as AccountStatus {
+  ACTIVE
+  FROZEN
+}
+
+class Transaction {
+  id : UUID
+  externalTransactionId : String
+  userId : UUID
+  sourceAccount : String
+  targetAccount : String
+  amount : BigDecimal
+  currency : String
+  country : String
+  merchantCategory : String
+  paymentMethod : String
+  ipAddress : String
+  deviceId : String
+  status : Transaction.Status
+  version : Long  {optimistic lock}
+  createdAt : Instant
+  updatedAt : Instant
+  + applyFraudDecision(decision) : boolean
+}
+enum "Transaction.Status" as TxStatus {
+  PENDING
+  REVIEW_REQUIRED
+  APPROVED
+  BLOCKED
+  ~ onFraudDecision(decision) : Status
+  + isFinal() : boolean
+}
+
+class IdempotencyKey {
+  userId : UUID
+  idempotencyKey : String  {unique per user}
+  requestHash : String
+  transactionId : UUID
+  createdAt : Instant
+}
+
+class OutboxEvent {
+  id : UUID  {sent as X-Event-Id}
+  aggregateType : String
+  aggregateId : String
+  eventType : String
+  topic : String
+  messageKey : String  {user id}
+  payload : Map<String, Object>
+  correlationId : String
+  createdAt : Instant
+  publishedAt : Instant
+  attempts : int
+  nextAttemptAt : Instant
+  lastError : String
+}
+
+Account "1" <-- "*" Transaction : sourceAccount
+Account ..> AccountStatus
+Transaction ..> TxStatus
+IdempotencyKey "0..1" --> "1" Transaction
+OutboxEvent ..> Transaction : transaction.created
+
+note right of TxStatus
+  State pattern: each status decides
+  how to react to a fraud decision
+end note
+note bottom of IdempotencyKey
+  claimed with INSERT ... ON CONFLICT DO NOTHING
+  in the same database transaction as the
+  transaction row and its outbox event
+end note
+@enduml

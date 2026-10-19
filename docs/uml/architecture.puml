@@ -1,0 +1,42 @@
+@startuml architecture
+!include style.iuml
+skinparam nodesep 55
+skinparam ranksep 70
+
+actor "Browser\nReact SPA\n(OIDC + PKCE)" as Browser
+node "nginx :3000\nstatic SPA · /auth · /api" as Nginx
+node "Keycloak 26\nusers · roles · tokens" as Keycloak
+component "API Gateway :8080\nJWT validation · routing\nclient IP · SSE per user" as Gateway
+
+component "transaction-service\naccounts · transactions\nidempotency · outbox" as Tx
+component "fraud-detection-service\nrule engine · decisions\nrule admin · outbox" as Fraud
+component "audit-service\naudit trail" as Audit
+component "notification-service\nnotifications" as Notify
+
+queue "Kafka (SASL/SCRAM + ACLs)\n\ntransaction.created\nfraud.analysis.completed\naudit.event.created" as Kafka
+
+database "PostgreSQL\none database\n+ role per service" as Pg
+database "Redis\nrule state\n(windows, devices)" as Redis
+
+Browser --> Nginx
+Nginx --> Keycloak : /auth/*
+Nginx --> Gateway : /api/* + Bearer JWT
+Gateway ..> Keycloak : JWKS
+Gateway --> Tx
+Gateway --> Fraud
+Gateway --> Audit
+
+Tx --> Kafka : transaction.created
+Kafka --> Fraud
+Fraud --> Kafka : fraud.analysis.completed\naudit.event.created
+Kafka --> Tx : decision
+Kafka --> Notify
+Kafka --> Audit
+Kafka --> Gateway : live events → SSE
+
+Tx --> Pg
+Fraud --> Pg
+Audit --> Pg
+Notify --> Pg
+Fraud --> Redis
+@enduml

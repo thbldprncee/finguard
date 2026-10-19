@@ -1,0 +1,105 @@
+@startuml fraud-domain
+!include style.iuml
+skinparam nodesep 30
+skinparam ranksep 50
+
+class FraudAnalysis {
+  transactionId : UUID  {unique}
+  userId : UUID
+  transactionOccurredAt : Instant
+  riskScore : int
+  decision : Decision
+  triggeredRules : String[]
+  failedRules : String[]
+  explanation : String
+  analyzedAt : Instant
+}
+enum Decision {
+  APPROVED
+  REVIEW_REQUIRED
+  BLOCKED
+}
+class FraudRule {
+  code : String
+  name : String
+  enabled : boolean
+  weight : int
+}
+
+class FraudAnalysisService {
+  + analyzeTransaction(event, correlationId)
+  + analyzeAfterFailure(rawEvent, correlationId, error)
+  + updateRule(id, request, actor, correlationId)
+}
+class RuleEngineService {
+  + evaluate(RuleContext) : Evaluation
+}
+class RuleConfigService {
+  reloads enabled / weight
+  on change and every 30 s
+}
+class DecisionMaker {
+  + decide(Evaluation) : Decision
+  + forFailedAnalysis() : Decision
+}
+interface RuleFailurePolicy {
+  + escalate(Decision) : Decision
+  + forFailedAnalysis() : Decision
+}
+class ReviewOnFailure
+class BlockOnFailure
+
+interface FraudRuleEvaluator {
+  + getRuleCode() : String
+  + evaluate(RuleContext) : RuleResult
+}
+class "RuleResult <<record>>" as RuleResult {
+  ruleCode : String
+  outcome : TRIGGERED | NOT_TRIGGERED | FAILED | DISABLED
+  score : int
+  reason : String
+}
+class RuleContext {
+  transaction data
+  occurredAt (creation time)
+}
+
+package "Rule implementations" {
+  class HighAmountRule
+  class VelocityRule
+  class StructuringRule
+  class RepeatedBlockedTransactionsRule
+  class CountryChangeRule
+  class SuspiciousMerchantCategoryRule
+  class NightActivityRule
+  class NewDeviceRule
+}
+
+FraudAnalysisService --> RuleEngineService
+FraudAnalysisService --> DecisionMaker
+FraudAnalysisService --> FraudAnalysis : saves
+RuleEngineService o--> "8" FraudRuleEvaluator
+RuleEngineService --> RuleConfigService : weights
+RuleConfigService --> FraudRule
+DecisionMaker --> RuleFailurePolicy
+RuleFailurePolicy <|.. ReviewOnFailure
+RuleFailurePolicy <|.. BlockOnFailure
+FraudRuleEvaluator ..> RuleContext
+FraudRuleEvaluator ..> RuleResult
+FraudAnalysis ..> Decision
+
+FraudRuleEvaluator <|.. HighAmountRule
+FraudRuleEvaluator <|.. VelocityRule
+FraudRuleEvaluator <|.. StructuringRule
+FraudRuleEvaluator <|.. RepeatedBlockedTransactionsRule
+FraudRuleEvaluator <|.. CountryChangeRule
+FraudRuleEvaluator <|.. SuspiciousMerchantCategoryRule
+FraudRuleEvaluator <|.. NightActivityRule
+FraudRuleEvaluator <|.. NewDeviceRule
+
+note bottom of RuleFailurePolicy
+  Strategy, chosen by
+  FRAUD_ON_RULE_FAILURE
+  (REVIEW by default)
+end note
+@enduml

@@ -1,0 +1,46 @@
+@startuml fraud-decision
+!include style.iuml
+skinparam ActivityBackgroundColor $fill
+skinparam ActivityBorderColor $border
+skinparam ActivityDiamondBackgroundColor $fill
+skinparam ActivityDiamondBorderColor $border
+
+start
+:transaction.created received;
+if (analysis for this transaction exists?) then (yes)
+  :skip (redelivery);
+  stop
+endif
+:build RuleContext\n(creation time, not arrival time);
+fork
+  :HIGH_AMOUNT +30;
+fork again
+  :VELOCITY +25;
+fork again
+  :STRUCTURING +25;
+fork again
+  :REPEATED_BLOCKED +25;
+fork again
+  :COUNTRY_CHANGE +20;
+fork again
+  :SUSPICIOUS_MERCHANT +20;
+fork again
+  :NIGHT_ACTIVITY +15;
+fork again
+  :NEW_DEVICE +15;
+end fork
+:score = Σ weights of triggered rules\n(weights from the fraud_rules table, capped at 100);
+switch (score?)
+case (0–39)
+  :APPROVED;
+case (40–69)
+  :REVIEW_REQUIRED;
+case (70–100)
+  :BLOCKED;
+endswitch
+if (any rule failed?) then (yes)
+  :failure policy escalates:\nREVIEW policy → at least REVIEW_REQUIRED\nBLOCK policy → BLOCKED;
+endif
+:save analysis + outbox event\nfraud.analysis.completed;
+stop
+@enduml

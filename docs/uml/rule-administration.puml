@@ -1,0 +1,22 @@
+@startuml rule-administration
+!include style.iuml
+autonumber
+
+actor Administrator
+participant "API Gateway" as Gw
+participant "fraud-detection-service" as Fraud
+database "fraud DB" as Db
+queue "Kafka" as K
+participant "audit-service" as Audit
+
+Administrator -> Gw : PATCH /api/fraud/rules/{id}\n{enabled, weight}
+Gw -> Fraud : forward (role ADMIN checked again)
+activate Fraud
+Fraud -> Db : update fraud_rules
+Fraud -> Db : outbox: FraudRuleUpdated → audit.event.created
+Fraud --> Administrator : 200 updated rule
+Fraud -> Fraud : after commit: reload rule settings\n(other instances pick it up on the 30 s refresh)
+deactivate Fraud
+Fraud -> K : audit.event.created
+K -> Audit : who changed which rule, old → new
+@enduml
