@@ -13,6 +13,12 @@ export const fraudApi = {
   getRules: () =>
     apiClient.get<FraudRule[]>('/fraud/rules').then((r) => r.data),
 
-  updateRule: (id: string, data: { enabled?: boolean; weight?: number }) =>
-    apiClient.patch<FraudRule>(`/fraud/rules/${id}`, data).then((r) => r.data),
+  /**
+   * `version` is the rule version the admin was looking at. If someone changed the rule since,
+   * the API answers 412 Precondition Failed: reload the rules and let the admin decide again.
+   */
+  updateRule: (id: string, version: number, data: { enabled?: boolean; weight?: number }) =>
+    apiClient.patch<FraudRule>(`/fraud/rules/${id}`, data, {
+      headers: { 'If-Match': `"${version}"` },
+    }).then((r) => r.data),
 }

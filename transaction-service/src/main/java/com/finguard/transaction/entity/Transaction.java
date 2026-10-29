@@ -1,5 +1,11 @@
 package com.finguard.transaction.entity;
 
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -22,36 +28,56 @@ public class Transaction {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @NotBlank
+    @Size(max = 100)
     @Column(nullable = false, unique = true)
     private String externalTransactionId;
 
+    @NotNull
     @Column(nullable = false)
     private UUID userId;
 
+    @NotBlank
+    @Size(max = 50)
     @Column(nullable = false)
     private String sourceAccount;
 
+    @NotBlank
+    @Size(max = 50)
     @Column(nullable = false)
     private String targetAccount;
 
+    @NotNull
+    @DecimalMin("0.01")
+    @Digits(integer = 15, fraction = 4)
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
+    @NotNull
+    @Pattern(regexp = "^[A-Z]{3}$")
     @Column(nullable = false, length = 3)
     private String currency;
 
+    @NotNull
+    @Pattern(regexp = "^[A-Z]{2,3}$")
     @Column(nullable = false, length = 3)
     private String country;
 
+    @Size(max = 50)
     private String merchantCategory;
 
+    @NotBlank
+    @Size(max = 30)
     @Column(nullable = false)
     private String paymentMethod;
 
+    @Size(max = 45)
     private String ipAddress;
 
+    @Size(max = 100)
     private String deviceId;
 
+    @NotNull
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Status status;

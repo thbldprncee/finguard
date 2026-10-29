@@ -1,5 +1,7 @@
 package com.finguard.audit.entity;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -27,17 +29,22 @@ public class AuditEvent {
     @Column(unique = true)
     private UUID eventId;
 
+    @NotBlank
+    @Size(max = 60)
     @Column(nullable = false)
     private String eventType;
 
+    @Size(max = 100)
     private String topic;
 
+    @Size(max = 100)
     private String aggregateId;
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> payload;
 
+    @Size(max = 100)
     private String correlationId;
 
     @CreationTimestamp

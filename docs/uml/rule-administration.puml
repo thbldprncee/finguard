@@ -9,12 +9,17 @@ database "fraud DB" as Db
 queue "Kafka" as K
 participant "audit-service" as Audit
 
-Administrator -> Gw : PATCH /api/fraud/rules/{id}\n{enabled, weight}
+Administrator -> Gw : PATCH /api/fraud/rules/{id}\nIf-Match: "<version>"\n{enabled, weight}
 Gw -> Fraud : forward (role ADMIN checked again)
 activate Fraud
-Fraud -> Db : update fraud_rules
+alt If-Match missing
+  Fraud --> Administrator : 428 Precondition Required
+else version is outdated (someone saved first)
+  Fraud --> Administrator : 412 Precondition Failed
+end
+Fraud -> Db : UPDATE fraud_rules ... WHERE id = ? AND version = ?\n(0 rows on a concurrent save → 412)
 Fraud -> Db : outbox: FraudRuleUpdated → audit.event.created
-Fraud --> Administrator : 200 updated rule
+Fraud --> Administrator : 200 updated rule, ETag: "<version + 1>"
 Fraud -> Fraud : after commit: reload rule settings\n(other instances pick it up on the 30 s refresh)
 deactivate Fraud
 Fraud -> K : audit.event.created

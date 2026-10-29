@@ -43,6 +43,8 @@ export interface FraudRule {
   description: string
   enabled: boolean
   weight: number
+  /** Optimistic-lock version; send it back in If-Match when updating the rule. */
+  version: number
   updatedAt: string
 }
 

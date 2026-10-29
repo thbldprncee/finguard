@@ -21,6 +21,8 @@ dependencies {
     // No HTTP API: JSON support for Kafka only.
     implementation("org.springframework.boot:spring-boot-starter-json")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    // Bean Validation: entities are checked before every INSERT/UPDATE.
+    implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("org.springframework.kafka:spring-kafka")

@@ -1,5 +1,8 @@
 package com.finguard.fraud.entity;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -21,6 +24,7 @@ public class FraudAnalysis {
     private UUID id;
 
     /** Unique: one analysis per transaction, which also makes re-delivered events no-ops. */
+    @NotNull
     @Column(nullable = false, unique = true)
     private UUID transactionId;
 
@@ -30,9 +34,12 @@ public class FraudAnalysis {
     /** When the transaction was created; history rules look back from this, not from analysis time. */
     private Instant transactionOccurredAt;
 
+    @Min(0)
+    @Max(100)
     @Column(nullable = false)
     private int riskScore;
 
+    @NotNull
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Decision decision;

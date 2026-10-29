@@ -7,6 +7,7 @@ import com.finguard.fraud.entity.FraudAnalysis;
 import com.finguard.fraud.entity.FraudRule;
 import com.finguard.fraud.event.FraudAnalysisCompleted;
 import com.finguard.fraud.event.FraudRuleUpdated;
+import com.finguard.fraud.exception.StaleVersionException;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
 import com.finguard.fraud.repository.FraudRuleRepository;
 import com.finguard.fraud.rule.RuleResult;
@@ -126,17 +127,34 @@ public class FraudAnalysisService {
         return fraudAnalysisRepository.findAlerts(pageable).map(FraudAnalysisResponse::from);
     }
 
+    /**
+     * Optimistic locking in two steps:
+     * <ol>
+     *   <li>the version the admin saw (If-Match) must equal the current one, otherwise the change
+     *       was made on an outdated copy and is rejected (412) instead of overwriting;</li>
+     *   <li>if two requests with the same version pass that check at the same time, @Version makes
+     *       Hibernate issue {@code UPDATE ... WHERE id = ? AND version = ?}; the second one matches
+     *       no row and fails with ObjectOptimisticLockingFailureException (also 412).</li>
+     * </ol>
+     * Comparing explicitly is required: Hibernate alone would only compare against the version
+     * loaded in this transaction, not against the one the admin was looking at.
+     */
     @Transactional
-    public FraudRule updateRule(UUID ruleId, FraudRuleUpdateRequest request, UUID actorId, String correlationId) {
+    public FraudRule updateRule(UUID ruleId, long expectedVersion, FraudRuleUpdateRequest request,
+                                UUID actorId, String correlationId) {
         FraudRule rule = fraudRuleRepository.findById(ruleId)
                 .orElseThrow(() -> new EntityNotFoundException("Fraud rule not found: " + ruleId));
+        if (rule.getVersion() != expectedVersion) {
+            throw new StaleVersionException("Fraud rule " + rule.getCode(), expectedVersion, rule.getVersion());
+        }
         boolean oldEnabled = rule.isEnabled();
         int oldWeight = rule.getWeight();
 
         if (request.enabled() != null) rule.setEnabled(request.enabled());
         if (request.weight() != null) rule.setWeight(request.weight());
 
-        FraudRule saved = fraudRuleRepository.save(rule);
+        // saveAndFlush: a version conflict surfaces here, inside the transaction, rather than at commit
+        FraudRule saved = fraudRuleRepository.saveAndFlush(rule);
         events.publishEvent(new FraudRuleUpdated(saved, oldEnabled, oldWeight, actorId, correlationId));
         log.info("Fraud rule {} updated by {}: enabled {} -> {}, weight {} -> {}",
                 rule.getCode(), actorId, oldEnabled, rule.isEnabled(), oldWeight, rule.getWeight());
