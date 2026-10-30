@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 public class HighAmountRule implements FraudRuleEvaluator {
 
     public static final String CODE = "HIGH_AMOUNT";
+    public static final String SIGNAL_AMOUNT_TO_THRESHOLD = "amount_to_threshold";
 
     private final FraudProperties.HighAmount settings;
 
@@ -27,10 +28,11 @@ public class HighAmountRule implements FraudRuleEvaluator {
     @Override
     public RuleResult evaluate(RuleContext ctx) {
         BigDecimal threshold = settings.thresholdFor(ctx.getCurrency());
-        if (ctx.getAmount().compareTo(threshold) > 0) {
-            return RuleResult.triggered(CODE, String.format("Amount %s %s exceeds threshold %s",
-                    ctx.getAmount().toPlainString(), ctx.getCurrency(), threshold.toPlainString()));
-        }
-        return RuleResult.notTriggered(CODE);
+        RuleResult result = ctx.getAmount().compareTo(threshold) > 0
+                ? RuleResult.triggered(CODE, String.format("Amount %s %s exceeds threshold %s",
+                        ctx.getAmount().toPlainString(), ctx.getCurrency(), threshold.toPlainString()))
+                : RuleResult.notTriggered(CODE);
+        // Comparable across currencies, unlike the raw amount.
+        return result.withSignal(SIGNAL_AMOUNT_TO_THRESHOLD, ctx.getAmount().doubleValue() / threshold.doubleValue());
     }
 }

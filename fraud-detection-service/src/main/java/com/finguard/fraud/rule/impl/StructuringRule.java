@@ -17,11 +17,19 @@ import java.util.Set;
  * Only qualifying (below-threshold) amounts are stored, so a large payment - HIGH_AMOUNT's job -
  * never counts towards structuring. Members are "transactionId:amount", so a re-delivered event
  * is counted once; scores are creation times, so the result does not depend on processing order.
+ * <p>
+ * The window is read newest first in pages and reading stops as soon as the rule has triggered,
+ * so the cost depends on the threshold, not on how many payments the user made in the window.
+ * Loading the whole window made every transaction of a very active account more expensive
+ * (thousands of members per call) and slowed down the whole consumer.
  */
 @Component
 public class StructuringRule implements FraudRuleEvaluator {
 
     public static final String CODE = "STRUCTURING";
+    /** Below-threshold payments of the user in the window, this one included; 0 for a large payment. */
+    public static final String SIGNAL_SMALL_PAYMENTS_IN_WINDOW = "structuring_payments_in_window";
+    private static final int PAGE_SIZE = 50;
 
     private final StringRedisTemplate redis;
     private final FraudProperties.Structuring settings;
@@ -54,19 +62,30 @@ public class StructuringRule implements FraudRuleEvaluator {
 
         zset.add(key, ctx.getTransactionId() + ":" + ctx.getAmount().toPlainString(), at);
         zset.removeRangeByScore(key, Double.NEGATIVE_INFINITY, at - retentionMillis);
-        Set<String> members = zset.rangeByScore(key, windowStart + 1, at);
         redis.expire(key, java.time.Duration.ofMillis(retentionMillis * 2));
+        Long inWindow = zset.count(key, windowStart + 1, at);
+        long payments = inWindow == null ? 0 : inWindow;
+        if (payments < settings.minTransactions()) {
+            return RuleResult.notTriggered(CODE).withSignal(SIGNAL_SMALL_PAYMENTS_IN_WINDOW, payments);
+        }
 
-        if (members == null || members.size() < settings.minTransactions()) {
-            return RuleResult.notTriggered(CODE);
+        BigDecimal total = BigDecimal.ZERO;
+        int counted = 0;
+        for (long offset = 0; offset < payments; offset += PAGE_SIZE) {
+            Set<String> page = zset.reverseRangeByScore(key, windowStart + 1, at, offset, PAGE_SIZE);
+            if (page == null || page.isEmpty()) {
+                break;
+            }
+            for (String member : page) {
+                total = total.add(new BigDecimal(member.substring(member.lastIndexOf(':') + 1)));
+                counted++;
+                if (counted >= settings.minTransactions() && total.compareTo(threshold) > 0) {
+                    return RuleResult.triggered(CODE, String.format("%d transactions below %s %s totalling %s within %d hours",
+                            counted, threshold.toPlainString(), ctx.getCurrency(), total.toPlainString(), settings.window().toHours()))
+                            .withSignal(SIGNAL_SMALL_PAYMENTS_IN_WINDOW, payments);
+                }
+            }
         }
-        BigDecimal total = members.stream()
-                .map(m -> new BigDecimal(m.substring(m.lastIndexOf(':') + 1)))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (total.compareTo(threshold) > 0) {
-            return RuleResult.triggered(CODE, String.format("%d transactions below %s %s totalling %s within %d hours",
-                    members.size(), threshold.toPlainString(), ctx.getCurrency(), total.toPlainString(), settings.window().toHours()));
-        }
-        return RuleResult.notTriggered(CODE);
+        return RuleResult.notTriggered(CODE).withSignal(SIGNAL_SMALL_PAYMENTS_IN_WINDOW, payments);
     }
 }

@@ -20,6 +20,8 @@ import org.springframework.stereotype.Component;
 public class VelocityRule implements FraudRuleEvaluator {
 
     public static final String CODE = "VELOCITY";
+    /** Transactions of the user in the velocity window, this one included. */
+    public static final String SIGNAL_TX_IN_WINDOW = "velocity_tx_in_window";
 
     private final StringRedisTemplate redis;
     private final FraudProperties.Velocity settings;
@@ -48,10 +50,11 @@ public class VelocityRule implements FraudRuleEvaluator {
         Long count = zset.count(key, windowStart + 1, at);
         redis.expire(key, java.time.Duration.ofMillis(retentionMillis * 2));
 
-        if (count != null && count > settings.maxTransactions()) {
-            return RuleResult.triggered(CODE, String.format("%d transactions within %d minutes (max %d)",
-                    count, settings.window().toMinutes(), settings.maxTransactions()));
-        }
-        return RuleResult.notTriggered(CODE);
+        long inWindow = count == null ? 0 : count;
+        RuleResult result = inWindow > settings.maxTransactions()
+                ? RuleResult.triggered(CODE, String.format("%d transactions within %d minutes (max %d)",
+                        inWindow, settings.window().toMinutes(), settings.maxTransactions()))
+                : RuleResult.notTriggered(CODE);
+        return result.withSignal(SIGNAL_TX_IN_WINDOW, inWindow);
     }
 }
