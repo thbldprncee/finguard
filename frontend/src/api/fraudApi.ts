@@ -10,6 +10,10 @@ export const fraudApi = {
   getAnalysis: (transactionId: string) =>
     apiClient.get<FraudAnalysis>(`/fraud/analysis/${transactionId}`).then((r) => r.data),
 
+  /** Analyst verdict on a transaction; the ML model is trained on these labels. */
+  label: (transactionId: string, fraud: boolean) =>
+    apiClient.put(`/fraud/analysis/${transactionId}/label`, { fraud }).then((r) => r.data),
+
   getRules: () =>
     apiClient.get<FraudRule[]>('/fraud/rules').then((r) => r.data),
 

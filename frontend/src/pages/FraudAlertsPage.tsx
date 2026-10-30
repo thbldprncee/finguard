@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Layout from '../components/Layout'
 import RiskBadge from '../components/RiskBadge'
 import { fraudApi } from '../api/fraudApi'
@@ -7,9 +7,17 @@ import { fraudApi } from '../api/fraudApi'
 export default function FraudAlertsPage() {
   const [page, setPage] = useState(0)
 
+  const qc = useQueryClient()
+
   const { data, isLoading } = useQuery({
     queryKey: ['alerts', page],
     queryFn: () => fraudApi.getAlerts(page, 20),
+  })
+
+  const label = useMutation({
+    mutationFn: ({ transactionId, fraud }: { transactionId: string; fraud: boolean }) =>
+      fraudApi.label(transactionId, fraud),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alerts'] }),
   })
 
   return (
@@ -20,14 +28,14 @@ export default function FraudAlertsPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-left">
-              {['Transaction ID', 'Decision', 'Risk Score', 'Triggered Rules', 'Explanation', 'Analyzed At'].map((h) => (
+              {['Transaction ID', 'Decision', 'Risk Score', 'ML', 'Triggered Rules', 'Explanation', 'Analyzed At', 'Verdict'].map((h) => (
                 <th key={h} className="px-4 py-3 font-medium">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {isLoading && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500">Loading…</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">Loading…</td></tr>
             )}
             {(data?.content ?? []).map((alert) => (
               <tr key={alert.id} className="border-b border-gray-800/50 hover:bg-gray-800/40">
@@ -44,6 +52,15 @@ export default function FraudAlertsPage() {
                     <span className="text-white font-mono">{alert.riskScore}</span>
                   </div>
                 </td>
+                <td className="px-4 py-3 font-mono" title={alert.mlModelVersion ?? 'no model'}>
+                  {alert.mlScore == null ? (
+                    <span className="text-gray-600">—</span>
+                  ) : (
+                    <span className={alert.mlScore >= 0.8 ? 'text-red-400' : alert.mlScore >= 0.5 ? 'text-yellow-400' : 'text-gray-300'}>
+                      {(alert.mlScore * 100).toFixed(0)}%
+                    </span>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   <div className="flex flex-wrap gap-1">
                     {alert.triggeredRules.map((r) => (
@@ -53,6 +70,27 @@ export default function FraudAlertsPage() {
                 </td>
                 <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{alert.explanation}</td>
                 <td className="px-4 py-3 text-gray-500">{new Date(alert.analyzedAt).toLocaleString()}</td>
+                <td className="px-4 py-3">
+                  <div className="flex gap-1" title="Was this really fraud? Trains the ML model.">
+                    {([true, false] as const).map((fraud) => {
+                      const chosen = alert.labeledFraud === fraud
+                      return (
+                        <button
+                          key={String(fraud)}
+                          disabled={label.isPending}
+                          onClick={() => label.mutate({ transactionId: alert.transactionId, fraud })}
+                          className={`text-xs rounded px-2 py-1 disabled:opacity-40 ${
+                            chosen
+                              ? fraud ? 'bg-red-600 text-white' : 'bg-green-600 text-white'
+                              : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                          }`}
+                        >
+                          {fraud ? 'Fraud' : 'Legit'}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
