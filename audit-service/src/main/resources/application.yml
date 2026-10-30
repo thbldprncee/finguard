@@ -2,6 +2,14 @@ server:
   port: 8085
   error:
     include-message: never
+  tomcat:
+    # Exposes tomcat_threads_busy etc. to Micrometer.
+    mbeanregistry:
+      enabled: true
+    # Idle keep-alive connections are closed after 20 s; the api-gateway pool drops them
+    # after 10 s (pool.max-idle-time), so it never reuses a connection Tomcat is closing.
+    keep-alive-timeout: 20s
+    max-keep-alive-requests: -1
 
 spring:
   application:
@@ -68,3 +76,22 @@ springdoc:
 logging:
   level:
     com.finguard: INFO
+
+# Metrics for Prometheus (scraped inside the docker network; nginx does not proxy /actuator).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Histogram buckets, so Prometheus can compute p95/p99 across instances.
+      percentiles-histogram:
+        http.server.requests: true
+        spring.kafka.listener: true

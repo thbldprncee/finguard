@@ -34,7 +34,10 @@ public class TransactionEventConsumer {
             // A failing DLT handler must not re-publish to the DLT forever (the default strategy).
             dltStrategy = DltStrategy.FAIL_ON_ERROR
     )
-    @KafkaListener(topics = "transaction.created", groupId = "fraud-detection-service")
+    @KafkaListener(topics = "transaction.created", groupId = "fraud-detection-service",
+            // One consumer thread per partition (the topic has 3). Events are keyed by user, so a
+            // user's events stay in one partition and are still processed in order.
+            concurrency = "${finguard.kafka.listener-concurrency:3}")
     public void onTransactionCreated(
             Map<String, Object> event,
             @Header(value = "X-Correlation-Id", required = false) String correlationId) {

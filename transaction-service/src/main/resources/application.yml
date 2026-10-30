@@ -2,6 +2,14 @@ server:
   port: 8082
   error:
     include-message: never
+  tomcat:
+    # Exposes tomcat_threads_busy etc. to Micrometer.
+    mbeanregistry:
+      enabled: true
+    # Idle keep-alive connections are closed after 20 s; the api-gateway pool drops them
+    # after 10 s (pool.max-idle-time), so it never reuses a connection Tomcat is closing.
+    keep-alive-timeout: 20s
+    max-keep-alive-requests: -1
 
 spring:
   application:
@@ -11,6 +19,11 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:transaction_svc}
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      # Every POST /api/transactions holds a connection for its transaction (account check,
+      # insert, outbox). With the default 10, 250+ rps queued up to ~190 requests for a
+      # connection (load test 2026-10-30) while CPU was idle.
+      maximum-pool-size: 30
   jpa:
     hibernate:
       ddl-auto: validate
@@ -77,3 +90,22 @@ springdoc:
 logging:
   level:
     com.finguard: INFO
+
+# Metrics for Prometheus (scraped inside the docker network; nginx does not proxy /actuator).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Histogram buckets, so Prometheus can compute p95/p99 across instances.
+      percentiles-histogram:
+        http.server.requests: true
+        spring.kafka.listener: true

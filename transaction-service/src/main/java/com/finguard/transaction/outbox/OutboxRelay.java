@@ -11,7 +11,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -51,11 +53,25 @@ public class OutboxRelay {
 
     private int publishBatch() {
         List<OutboxEvent> batch = repository.lockNextBatch(Instant.now(), properties.batchSize());
-        int published = 0;
+        // A batch holds at most one event per key, so its events may be in flight together:
+        // order only matters within a key. Waiting for each send in turn capped the relay at
+        // one broker round trip per event.
+        List<CompletableFuture<?>> sends = new ArrayList<>(batch.size());
         for (OutboxEvent event : batch) {
+            CompletableFuture<?> send;
             try {
-                kafkaTemplate.send(toRecord(event))
-                        .get(properties.sendTimeout().toMillis(), TimeUnit.MILLISECONDS);
+                send = kafkaTemplate.send(toRecord(event));
+            } catch (RuntimeException e) {
+                send = CompletableFuture.failedFuture(e);
+            }
+            sends.add(send);
+        }
+        long deadline = System.nanoTime() + properties.sendTimeout().toNanos();
+        int published = 0;
+        for (int i = 0; i < batch.size(); i++) {
+            OutboxEvent event = batch.get(i);
+            try {
+                sends.get(i).get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 event.setPublishedAt(Instant.now());
                 published++;
             } catch (InterruptedException e) {

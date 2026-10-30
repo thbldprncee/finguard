@@ -13,6 +13,8 @@ import java.time.Duration;
 @ConfigurationProperties("finguard.outbox")
 public record OutboxProperties(
         @NotNull @DefaultValue("500ms") Duration pollInterval,
+        /** How long a commit-triggered publish waits to batch further commits. */
+        @NotNull @DefaultValue("25ms") Duration triggerDelay,
         @Min(1) @Max(1000) @DefaultValue("100") int batchSize,
         @NotNull @DefaultValue("10s") Duration sendTimeout,
         @NotNull @DefaultValue("1s") Duration initialBackoff,

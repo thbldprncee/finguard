@@ -37,7 +37,10 @@ public class AuditEventConsumer {
             "audit.event.created",
             "transaction.created",
             "fraud.analysis.completed"
-    }, groupId = "audit-service")
+    }, groupId = "audit-service",
+            // One thread fell ~200 000 records behind at 300 rps (load test 2026-10-30). Three
+            // threads share the topics' partitions; order within a partition (a key) is kept.
+            concurrency = "${finguard.kafka.listener-concurrency:3}")
     public void onEvent(Map<String, Object> payload,
                         @Header(KafkaHeaders.RECEIVED_TOPIC) String topic,
                         @Header(value = "X-Event-Id", required = false) String eventIdHeader,

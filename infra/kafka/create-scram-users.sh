@@ -6,6 +6,18 @@ set -euo pipefail
 ZK=zookeeper:2181
 cub zk-ready "$ZK" 120
 
+# ZooKeeper restores sessions from its data volume. When ZooKeeper and the broker were stopped
+# together (e.g. both recreated by `docker compose up`), the old broker session survives the
+# restart and keeps the ephemeral /brokers/ids/1 until it times out (zookeeper.session.timeout.ms,
+# 18 s). A broker started earlier dies with NodeExists, so wait until that node is gone.
+for i in $(seq 1 60); do
+  # zookeeper-shell exits 1 for a missing node; capture first so pipefail does not interfere.
+  out=$(zookeeper-shell "$ZK" get /brokers/ids/1 2>&1 || true)
+  case "$out" in *"does not exist"*) break ;; esac
+  [ "$i" = 1 ] && echo "waiting for the stale broker registration /brokers/ids/1 to expire"
+  sleep 1
+done
+
 add_user() {
   kafka-configs --zookeeper "$ZK" --alter \
     --add-config "SCRAM-SHA-512=[iterations=8192,password=$2]" \

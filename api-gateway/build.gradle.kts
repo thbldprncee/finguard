@@ -17,7 +17,9 @@ repositories {
     mavenCentral()
 }
 
-extra["springCloudVersion"] = "2023.0.3"
+// The release train must match Spring Boot: 2025.0.x (Northfields) is the one for Boot 3.5.
+// Spring Cloud checks this at startup and refuses to start on a mismatch.
+extra["springCloudVersion"] = "2025.0.0"
 
 dependencyManagement {
     imports {
@@ -26,8 +28,10 @@ dependencyManagement {
 }
 
 dependencies {
-    implementation("org.springframework.cloud:spring-cloud-starter-gateway")
+    implementation("org.springframework.cloud:spring-cloud-starter-gateway-server-webflux")
     implementation("org.springframework.boot:spring-boot-starter-security")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.kafka:spring-kafka")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
