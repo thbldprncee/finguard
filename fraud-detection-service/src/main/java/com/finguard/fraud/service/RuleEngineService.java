@@ -32,6 +32,13 @@ public class RuleEngineService {
         public List<RuleResult> failed() {
             return results.stream().filter(RuleResult::failed).toList();
         }
+
+        /** This evaluation with one more rule result (e.g. the ML model's), score recomputed. */
+        public Evaluation plus(RuleResult result) {
+            List<RuleResult> all = new ArrayList<>(results);
+            all.add(result);
+            return new Evaluation(List.copyOf(all), Math.min(100, all.stream().mapToInt(RuleResult::scoreContribution).sum()));
+        }
     }
 
     public Evaluation evaluate(RuleContext context) {

@@ -6,8 +6,11 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 @Entity
@@ -57,6 +60,16 @@ public class FraudAnalysis {
     @CreationTimestamp
     @Column(updatable = false)
     private Instant analyzedAt;
+
+    /** Raw ML features at scoring time ({@link com.finguard.fraud.ml.MlFeatures}); training data. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
+    private Map<String, Object> features;
+
+    /** Fraud probability from the ML model (shadow mode: not part of the decision); null without a model. */
+    private Double mlScore;
+
+    private String mlModelVersion;
 
     public enum Decision {
         APPROVED, REVIEW_REQUIRED, BLOCKED;

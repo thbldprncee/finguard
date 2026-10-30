@@ -4,12 +4,17 @@ import com.finguard.fraud.decision.DecisionMaker;
 import com.finguard.fraud.dto.FraudAnalysisResponse;
 import com.finguard.fraud.dto.FraudRuleUpdateRequest;
 import com.finguard.fraud.entity.FraudAnalysis;
+import com.finguard.fraud.entity.FraudLabel;
 import com.finguard.fraud.entity.FraudRule;
 import com.finguard.fraud.event.FraudAnalysisCompleted;
 import com.finguard.fraud.event.FraudRuleUpdated;
 import com.finguard.fraud.exception.StaleVersionException;
+import com.finguard.fraud.ml.MlRule;
+import com.finguard.fraud.ml.MlScorer;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
+import com.finguard.fraud.repository.FraudLabelRepository;
 import com.finguard.fraud.repository.FraudRuleRepository;
+import com.finguard.fraud.rule.RuleContext;
 import com.finguard.fraud.rule.RuleResult;
 import com.finguard.fraud.rule.TransactionEvent;
 import com.finguard.fraud.security.AuthenticatedUser;
@@ -38,6 +43,8 @@ public class FraudAnalysisService {
     private final FraudAnalysisRepository fraudAnalysisRepository;
     private final FraudRuleRepository fraudRuleRepository;
     private final ApplicationEventPublisher events;
+    private final MlRule mlRule;
+    private final FraudLabelRepository fraudLabelRepository;
 
     /**
      * Idempotent consumer: Kafka delivers at least once, so the same transaction may arrive again.
@@ -53,9 +60,14 @@ public class FraudAnalysisService {
             return;
         }
 
-        RuleEngineService.Evaluation evaluation = ruleEngineService.evaluate(event.toRuleContext());
+        RuleContext context = event.toRuleContext();
+        // The ML model counts only if ML_SCORE is enabled; its score and features are stored either way.
+        MlRule.Outcome scored = mlRule.apply(context, ruleEngineService.evaluate(context));
+        RuleEngineService.Evaluation evaluation = scored.evaluation();
         List<RuleResult> failed = evaluation.failed();
         FraudAnalysis.Decision decision = decisionMaker.decide(evaluation);
+        Map<String, Object> features = scored.features();
+        MlScorer.Score ml = scored.score();
 
         List<String> reasons = new ArrayList<>(evaluation.triggered().stream().map(RuleResult::reason).toList());
         if (!failed.isEmpty()) {
@@ -72,11 +84,15 @@ public class FraudAnalysisService {
                 .triggeredRules(evaluation.triggered().stream().map(RuleResult::ruleCode).toArray(String[]::new))
                 .failedRules(failed.stream().map(RuleResult::ruleCode).toArray(String[]::new))
                 .explanation(reasons.isEmpty() ? "No suspicious patterns detected" : String.join("; ", reasons))
+                .features(features)
+                .mlScore(ml == null ? null : ml.probability())
+                .mlModelVersion(ml == null ? null : ml.modelVersion())
                 .build());
         events.publishEvent(new FraudAnalysisCompleted(analysis, correlationId));
 
-        log.info("Fraud analysis complete: txId={}, score={}, decision={}, failedRules={}",
-                event.transactionId(), evaluation.riskScore(), decision, failed.size());
+        log.info("Fraud analysis complete: txId={}, score={}, decision={}, failedRules={}, mlScore={}",
+                event.transactionId(), evaluation.riskScore(), decision, failed.size(),
+                ml == null ? "-" : String.format("%.3f", ml.probability()));
     }
 
     /**
@@ -119,12 +135,39 @@ public class FraudAnalysisService {
         FraudAnalysis analysis = fraudAnalysisRepository.findByTransactionId(transactionId)
                 .filter(a -> user.isStaff() || user.userId().equals(a.getUserId()))
                 .orElseThrow(() -> new EntityNotFoundException("Fraud analysis not found for transaction: " + transactionId));
-        return user.isStaff() ? FraudAnalysisResponse.from(analysis) : FraudAnalysisResponse.summaryOf(analysis);
+        return user.isStaff()
+                ? FraudAnalysisResponse.from(analysis, fraudLabelRepository.findById(transactionId).map(FraudLabel::isFraud).orElse(null))
+                : FraudAnalysisResponse.summaryOf(analysis);
+    }
+
+    /**
+     * An analyst's verdict on a transaction: the ground truth the ML model is trained on.
+     * Re-labelling replaces the previous verdict.
+     */
+    @Transactional
+    public FraudLabel label(UUID transactionId, boolean fraud, String note, UUID analystId) {
+        if (!fraudAnalysisRepository.existsByTransactionId(transactionId)) {
+            throw new EntityNotFoundException("Fraud analysis not found for transaction: " + transactionId);
+        }
+        FraudLabel label = fraudLabelRepository.save(FraudLabel.builder()
+                .transactionId(transactionId)
+                .fraud(fraud)
+                .source(FraudLabel.Source.ANALYST)
+                .labeledBy(analystId)
+                .note(note)
+                .labeledAt(Instant.now())
+                .build());
+        log.info("Transaction {} labelled fraud={} by {}", transactionId, fraud, analystId);
+        return label;
     }
 
     @Transactional(readOnly = true)
     public Page<FraudAnalysisResponse> getAlerts(Pageable pageable) {
-        return fraudAnalysisRepository.findAlerts(pageable).map(FraudAnalysisResponse::from);
+        Page<FraudAnalysis> alerts = fraudAnalysisRepository.findAlerts(pageable);
+        Map<UUID, Boolean> labels = new java.util.HashMap<>();
+        fraudLabelRepository.findAllById(alerts.map(FraudAnalysis::getTransactionId).getContent())
+                .forEach(l -> labels.put(l.getTransactionId(), l.isFraud()));
+        return alerts.map(a -> FraudAnalysisResponse.from(a, labels.get(a.getTransactionId())));
     }
 
     /**

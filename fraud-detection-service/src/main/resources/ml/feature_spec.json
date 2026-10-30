@@ -1,0 +1,197 @@
+{
+  "model_version": "lgbm-20261030-2141",
+  "features": [
+    {
+      "name": "amount_log1p",
+      "source": "amount",
+      "kind": "log1p",
+      "value": null
+    },
+    {
+      "name": "has_device",
+      "source": "has_device",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rules_failed",
+      "source": "rules_failed",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "amount_to_threshold",
+      "source": "amount_to_threshold",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "velocity_tx_in_window",
+      "source": "velocity_tx_in_window",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "structuring_payments_in_window",
+      "source": "structuring_payments_in_window",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_COUNTRY_CHANGE",
+      "source": "rule_COUNTRY_CHANGE",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_HIGH_AMOUNT",
+      "source": "rule_HIGH_AMOUNT",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_NEW_DEVICE",
+      "source": "rule_NEW_DEVICE",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_NIGHT_ACTIVITY",
+      "source": "rule_NIGHT_ACTIVITY",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_REPEATED_BLOCKED",
+      "source": "rule_REPEATED_BLOCKED",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_STRUCTURING",
+      "source": "rule_STRUCTURING",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_SUSPICIOUS_MERCHANT",
+      "source": "rule_SUSPICIOUS_MERCHANT",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "rule_VELOCITY",
+      "source": "rule_VELOCITY",
+      "kind": "numeric",
+      "value": null
+    },
+    {
+      "name": "country=DE",
+      "source": "country",
+      "kind": "onehot",
+      "value": "DE"
+    },
+    {
+      "name": "country=ES",
+      "source": "country",
+      "kind": "onehot",
+      "value": "ES"
+    },
+    {
+      "name": "country=FR",
+      "source": "country",
+      "kind": "onehot",
+      "value": "FR"
+    },
+    {
+      "name": "country=GB",
+      "source": "country",
+      "kind": "onehot",
+      "value": "GB"
+    },
+    {
+      "name": "country=GR",
+      "source": "country",
+      "kind": "onehot",
+      "value": "GR"
+    },
+    {
+      "name": "country=NG",
+      "source": "country",
+      "kind": "onehot",
+      "value": "NG"
+    },
+    {
+      "name": "country=NL",
+      "source": "country",
+      "kind": "onehot",
+      "value": "NL"
+    },
+    {
+      "name": "country=PH",
+      "source": "country",
+      "kind": "onehot",
+      "value": "PH"
+    },
+    {
+      "name": "country=PL",
+      "source": "country",
+      "kind": "onehot",
+      "value": "PL"
+    },
+    {
+      "name": "country=TH",
+      "source": "country",
+      "kind": "onehot",
+      "value": "TH"
+    },
+    {
+      "name": "country=TR",
+      "source": "country",
+      "kind": "onehot",
+      "value": "TR"
+    },
+    {
+      "name": "country=US",
+      "source": "country",
+      "kind": "onehot",
+      "value": "US"
+    },
+    {
+      "name": "merchant_category=ELECTRONICS",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "ELECTRONICS"
+    },
+    {
+      "name": "merchant_category=GAMBLING",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "GAMBLING"
+    },
+    {
+      "name": "merchant_category=GROCERY",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "GROCERY"
+    },
+    {
+      "name": "merchant_category=RESTAURANTS",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "RESTAURANTS"
+    },
+    {
+      "name": "merchant_category=RETAIL",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "RETAIL"
+    },
+    {
+      "name": "merchant_category=TRAVEL",
+      "source": "merchant_category",
+      "kind": "onehot",
+      "value": "TRAVEL"
+    }
+  ]
+}

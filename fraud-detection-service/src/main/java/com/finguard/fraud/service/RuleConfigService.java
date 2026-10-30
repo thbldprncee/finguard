@@ -51,7 +51,8 @@ public class RuleConfigService implements SmartInitializingSingleton {
         if (!missing.isEmpty()) {
             throw new IllegalStateException("No fraud_rules row for rule(s) " + missing + "; add a Flyway migration");
         }
-        Set<String> known = evaluators.stream().map(FraudRuleEvaluator::getRuleCode).collect(Collectors.toSet());
+        Set<String> known = evaluators.stream().map(FraudRuleEvaluator::getRuleCode).collect(Collectors.toCollection(java.util.HashSet::new));
+        known.add(com.finguard.fraud.ml.MlRule.CODE); // evaluated by MlRule after the other rules
         settings.keySet().stream().filter(code -> !known.contains(code))
                 .forEach(code -> log.warn("fraud_rules row {} has no evaluator and is ignored", code));
     }

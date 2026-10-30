@@ -1,7 +1,9 @@
 package com.finguard.fraud.controller;
 
 import com.finguard.fraud.dto.FraudAnalysisResponse;
+import com.finguard.fraud.dto.FraudLabelRequest;
 import com.finguard.fraud.dto.FraudRuleUpdateRequest;
+import com.finguard.fraud.entity.FraudLabel;
 import com.finguard.fraud.entity.FraudRule;
 import com.finguard.fraud.exception.InvalidHeaderException;
 import com.finguard.fraud.exception.PreconditionRequiredException;
@@ -26,6 +28,7 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 
@@ -63,6 +66,17 @@ public class FraudController {
     public FraudAnalysisResponse getAnalysis(@PathVariable UUID transactionId,
                                              @AuthenticationPrincipal AuthenticatedUser user) {
         return fraudAnalysisService.getByTransactionId(transactionId, user);
+    }
+
+    @PutMapping("/analysis/{transactionId}/label")
+    @PreAuthorize("hasAnyRole('ANALYST', 'ADMIN')")
+    @Operation(summary = "Record whether the transaction really was fraud (training label for the ML model)")
+    public Map<String, Object> label(@PathVariable UUID transactionId,
+                                     @Valid @RequestBody FraudLabelRequest request,
+                                     @AuthenticationPrincipal AuthenticatedUser analyst) {
+        FraudLabel label = fraudAnalysisService.label(transactionId, request.fraud(), request.note(), analyst.userId());
+        return Map.of("transactionId", label.getTransactionId(), "fraud", label.isFraud(),
+                "source", label.getSource().name(), "labeledAt", label.getLabeledAt());
     }
 
     @GetMapping("/rules")

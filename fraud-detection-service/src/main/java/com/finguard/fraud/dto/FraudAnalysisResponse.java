@@ -21,20 +21,30 @@ public record FraudAnalysisResponse(
         List<String> triggeredRules,
         List<String> failedRules,
         String explanation,
-        Instant analyzedAt
+        Instant analyzedAt,
+        /** Staff only; shadow-mode ML fraud probability, null without a model. */
+        Double mlScore,
+        String mlModelVersion,
+        /** Staff only; an analyst's verdict (true = fraud), null while unlabelled. */
+        Boolean labeledFraud
 ) {
     public static FraudAnalysisResponse from(FraudAnalysis a) {
+        return from(a, null);
+    }
+
+    public static FraudAnalysisResponse from(FraudAnalysis a, Boolean labeledFraud) {
         return new FraudAnalysisResponse(
                 a.getId(), a.getTransactionId(),
                 a.getRiskScore(), a.getDecision().name(),
                 list(a.getTriggeredRules()), list(a.getFailedRules()),
-                a.getExplanation(), a.getAnalyzedAt()
+                a.getExplanation(), a.getAnalyzedAt(),
+                a.getMlScore(), a.getMlModelVersion(), labeledFraud
         );
     }
 
     public static FraudAnalysisResponse summaryOf(FraudAnalysis a) {
         return new FraudAnalysisResponse(null, a.getTransactionId(), null, a.getDecision().name(),
-                null, null, null, a.getAnalyzedAt());
+                null, null, null, a.getAnalyzedAt(), null, null, null);
     }
 
     private static List<String> list(String[] values) {
