@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: services
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - transaction-service:8082
+          - fraud-detection-service:8083
+          - audit-service:8085
+          - api-gateway:8080
+  - job_name: kafka
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']

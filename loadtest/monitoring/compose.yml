@@ -1,0 +1,64 @@
+# Monitoring for load tests. Started together with the main stack:
+#   docker compose -f docker-compose.yml -f loadtest/monitoring/compose.yml up -d
+# Prometheus: http://localhost:9090   Grafana: http://localhost:3001 (dashboard "FinGuard load test")
+# Both are published on 127.0.0.1 only. Paths are relative to the project directory.
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    mem_limit: 512m
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./loadtest/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [finguard-net]
+
+  # Consumer group lag per topic: how far each service is behind the events.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    mem_limit: 128m
+    command:
+      - --kafka.server=kafka:29092
+      - --kafka.version=3.6.0
+      - --sasl.enabled
+      - --sasl.mechanism=scram-sha512
+      - --sasl.username=admin
+      - --sasl.password=${KAFKA_ADMIN_PASSWORD}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks: [finguard-net]
+
+  # Connections per database and state, transactions, locks.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    mem_limit: 128m
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [finguard-net]
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    mem_limit: 256m
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/finguard.json
+    volumes:
+      - ./loadtest/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./loadtest/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on: [prometheus]
+    networks: [finguard-net]
+
+volumes:
+  prometheus_data:

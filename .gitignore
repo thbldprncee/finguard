@@ -6,3 +6,8 @@ frontend/dist/
 .idea/
 *.iml
 .DS_Store
+loadtest/results/
+loadtest/.loadtest-password
+
+# Synthetic labels written by ml/generate.py (the labels themselves live in fraud_db)
+ml/data/
