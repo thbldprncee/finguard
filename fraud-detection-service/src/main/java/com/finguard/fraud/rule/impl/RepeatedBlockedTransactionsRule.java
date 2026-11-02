@@ -1,7 +1,6 @@
 package com.finguard.fraud.rule.impl;
 
 import com.finguard.fraud.config.FraudProperties;
-import com.finguard.fraud.entity.FraudAnalysis;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
 import com.finguard.fraud.rule.FraudRuleEvaluator;
 import com.finguard.fraud.rule.RuleContext;
@@ -37,10 +36,11 @@ public class RepeatedBlockedTransactionsRule implements FraudRuleEvaluator {
     @Override
     public RuleResult evaluate(RuleContext ctx) {
         Instant at = ctx.getOccurredAt();
-        long count = repository.countByUserIdAndDecisionAndTransactionOccurredAtGreaterThanEqualAndTransactionOccurredAtLessThan(
-                ctx.getUserId(), FraudAnalysis.Decision.BLOCKED, at.minus(settings.lookback()), at);
+        // Only whether min-count is reached matters, so stop counting there.
+        long count = repository.countBlockedUpTo(
+                ctx.getUserId(), at.minus(settings.lookback()), at, settings.minCount());
         if (count >= settings.minCount()) {
-            return RuleResult.triggered(CODE, String.format("%d blocked transactions in the last %d hours",
+            return RuleResult.triggered(CODE, String.format("at least %d blocked transactions in the last %d hours",
                     count, settings.lookback().toHours()));
         }
         return RuleResult.notTriggered(CODE);

@@ -150,7 +150,7 @@ None of the services publishes a port in `docker-compose.yml`; only nginx (:3000
 
 ## Fraud Detection Engine
 
-Each rule reports whether it fired and why. The score it adds is its **weight from the `fraud_rules` table**; disabling or re-weighting a rule via `PATCH /api/fraud/rules/{id}` takes effect immediately (the engine reloads the settings after the update and every 30 s). Start-up fails if a rule implementation has no database row.
+Each rule reports whether it fired and why. The score it adds is its **weight from the `fraud_rules` table**; disabling or re-weighting a rule via `PATCH /api/fraud/rules/{id}` takes effect immediately (the engine reloads the settings after the update and every 30 s). Rule updates use optimistic locking: the admin sends the version they edited in `If-Match`, and a change based on an outdated copy is rejected with `412` instead of silently overwriting another admin's change. Start-up fails if a rule implementation has no database row.
 
 | Rule | Trigger | Default weight |
 |------|---------|---------------|
@@ -323,8 +323,9 @@ All requests go through nginx (`http://localhost:3000/api/...`) with `Authorizat
 | `GET` | `/api/transactions/{id}` | USER | One transaction (404 if not mine) |
 | `GET` | `/api/fraud/analysis/{transactionId}` | USER | Decision for my transaction; full analysis for staff |
 | `GET` | `/api/fraud/alerts` | ANALYST | `REVIEW_REQUIRED` and `BLOCKED` analyses |
-| `GET` | `/api/fraud/rules` | ANALYST | Rules with weights |
-| `PATCH` | `/api/fraud/rules/{id}` | ADMIN | Enable/disable, change weight (audited) |
+| `GET` | `/api/fraud/rules` | ANALYST | Rules with weights and `version` |
+| `GET` | `/api/fraud/rules/{id}` | ANALYST | One rule; `ETag` holds its version |
+| `PATCH` | `/api/fraud/rules/{id}` | ADMIN | Enable/disable, change weight (audited); requires `If-Match: "<version>"`, `412` if the rule changed meanwhile, `428` without `If-Match` |
 | `GET` | `/api/audit/events` | ANALYST | Audit trail (`eventType`, `aggregateId` filters) |
 | `GET` | `/api/sse/events` | USER | Live events (own only for USER) |
 

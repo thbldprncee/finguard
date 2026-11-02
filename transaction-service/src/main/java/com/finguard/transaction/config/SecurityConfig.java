@@ -26,6 +26,8 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/api-docs/**", "/error").permitAll()
+                        // Health and Prometheus metrics: reachable only inside the docker network.
+                        .requestMatchers("/actuator/health/**", "/actuator/prometheus").permitAll()
                         .anyRequest().hasAnyRole("USER", "ANALYST", "ADMIN")
                 )
                 // Missing/invalid token -> 401 with WWW-Authenticate: Bearer.

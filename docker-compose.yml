@@ -7,8 +7,12 @@
 
 name: finguard
 
+# Memory limits: without them every JVM sizes its heap from the whole Docker VM and the
+# containers together can exhaust it; the kernel then kills the biggest process (this took
+# Keycloak down under load). With a limit the JVM sizes its heap from it (MaxRAMPercentage).
 x-java-service: &java-service
   restart: on-failure
+  mem_limit: 768m
   networks: [finguard-net]
   security_opt: ["no-new-privileges:true"]
 
@@ -39,6 +43,11 @@ x-backend-deps: &backend-deps
 services:
   postgres:
     image: postgres:16-alpine
+    mem_limit: 1g
+    # Default max_connections=100 was nearly used up by the services' pools (Keycloak alone
+    # keeps ~50), leaving no room to give transaction-service a larger pool. shared_buffers
+    # 128MB (default) kept the hot indexes of fraud_analyses out of the cache.
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run scripts/generate-env.sh}
@@ -60,6 +69,7 @@ services:
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
+    mem_limit: 512m
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -77,6 +87,11 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
+    mem_limit: 1536m
+    # If ZooKeeper still holds /brokers/ids/1 from a previous broker session (restored from its
+    # data volume after a recreate), registration fails with NodeExists until that session
+    # expires (18 s). Restart instead of leaving the broker down; kafka-scram-init also waits.
+    restart: on-failure
     depends_on:
       kafka-scram-init:
         condition: service_completed_successfully
@@ -124,7 +139,14 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    # Redis holds the fraud rules' history. maxmemory stays below the container limit, so Redis
+    # refuses writes instead of being OOM-killed; "noeviction" because silently dropping a
+    # user's history would under-score risk, whereas a refused write makes the rule FAILED and
+    # the fail-safe policy escalates the decision. No RDB snapshots: the fork doubles memory and
+    # the data is not on a volume anyway.
+    mem_limit: 512m
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --maxmemory 400mb --maxmemory-policy noeviction --save ''"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is not set}
       REDISCLI_AUTH: ${REDIS_PASSWORD}
@@ -137,12 +159,17 @@ services:
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
+    # Login for every user depends on it: restart it if it dies.
+    restart: unless-stopped
+    mem_limit: 1536m
     command: ["start", "--import-realm"]
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak_db
       KC_DB_USERNAME: keycloak_svc
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      # Keycloak's pool grows to 100 by default and held ~50 idle PostgreSQL connections.
+      KC_DB_POOL_MAX_SIZE: "30"
       KC_HTTP_ENABLED: "true"
       KC_HTTP_RELATIVE_PATH: /auth
       # Browser-facing URL (via the frontend nginx). It is also the token issuer.
@@ -258,6 +285,7 @@ services:
 
   frontend:
     build: ./frontend
+    mem_limit: 128m
     ports:
       - "3000:8080"
     depends_on: [api-gateway, keycloak]

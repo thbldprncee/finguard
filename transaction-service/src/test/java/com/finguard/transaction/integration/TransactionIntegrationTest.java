@@ -199,12 +199,16 @@ class TransactionIntegrationTest {
     void outboxRelay_neverOvertakesAnUnpublishedEventOfTheSameKey() {
         String key = "user-" + UUID.randomUUID();
         Instant now = Instant.now();
-        OutboxEvent waitingForRetry = outboxEvent(key, now.minusSeconds(10), now.plusSeconds(3600));
-        OutboxEvent later = outboxEvent(key, now.minusSeconds(5), now.minusSeconds(5));
-        OutboxEvent otherKey = outboxEvent("user-" + UUID.randomUUID(), now.minusSeconds(5), now.minusSeconds(5));
+        // All three are due only an hour from now, and the batch is taken "an hour from now": the
+        // relay running in the background (real clock) never picks them up or locks them, which
+        // made this test flaky when it got to otherKey first.
+        Instant inAnHour = now.plusSeconds(3600);
+        OutboxEvent waitingForRetry = outboxEvent(key, now.minusSeconds(10), inAnHour.plusSeconds(3600));
+        OutboxEvent later = outboxEvent(key, now.minusSeconds(5), inAnHour);
+        OutboxEvent otherKey = outboxEvent("user-" + UUID.randomUUID(), now.minusSeconds(5), inAnHour);
         outboxEventRepository.saveAll(List.of(waitingForRetry, later, otherKey));
 
-        List<UUID> due = tx.execute(s -> outboxEventRepository.lockNextBatch(Instant.now(), 100).stream().map(OutboxEvent::getId).toList());
+        List<UUID> due = tx.execute(s -> outboxEventRepository.lockNextBatch(inAnHour.plusSeconds(60), 100).stream().map(OutboxEvent::getId).toList());
 
         assertThat(due).contains(otherKey.getId()).doesNotContain(later.getId(), waitingForRetry.getId());
         outboxEventRepository.deleteAll(List.of(waitingForRetry, later, otherKey));

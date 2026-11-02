@@ -34,6 +34,8 @@ public class SecurityConfig {
                 .securityContextRepository(NoOpServerSecurityContextRepository.getInstance())
                 .authorizeExchange(auth -> auth
                         .pathMatchers(HttpMethod.OPTIONS).permitAll()
+                        // Health and Prometheus metrics (nginx does not proxy /actuator).
+                        .pathMatchers("/actuator/health/**", "/actuator/prometheus").permitAll()
                         .anyExchange().hasAnyRole("USER", "ANALYST", "ADMIN"))
                 .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt
                         .jwtDecoder(jwtDecoder)

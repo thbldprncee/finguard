@@ -34,6 +34,11 @@ export interface FraudAnalysis {
   failedRules: string[]
   explanation: string
   analyzedAt: string
+  /** Fraud probability from the ML model (0..1); null without a model. */
+  mlScore: number | null
+  mlModelVersion: string | null
+  /** Analyst verdict: true = fraud, false = legitimate, null = not labelled yet. */
+  labeledFraud: boolean | null
 }
 
 export interface FraudRule {
@@ -43,6 +48,8 @@ export interface FraudRule {
   description: string
   enabled: boolean
   weight: number
+  /** Optimistic-lock version; send it back in If-Match when updating the rule. */
+  version: number
   updatedAt: string
 }
 

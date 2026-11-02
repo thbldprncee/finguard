@@ -54,7 +54,10 @@ class FraudAnalysisServiceTest {
 
     private FraudAnalysisService service(FraudProperties properties) {
         var decisionMaker = new DecisionMaker(properties, new DecisionConfig().ruleFailurePolicy(properties));
-        return new FraudAnalysisService(ruleEngineService, decisionMaker, analysisRepository, ruleRepository, events);
+        return new FraudAnalysisService(ruleEngineService, decisionMaker, analysisRepository, ruleRepository, events,
+                new com.finguard.fraud.ml.MlRule(mock(com.finguard.fraud.ml.MlScorer.class),
+                        mock(RuleConfigService.class), new com.finguard.fraud.ml.MlProperties(true, "classpath:ml/", 0.8)),
+                mock(com.finguard.fraud.repository.FraudLabelRepository.class));
     }
 
     private void verifyPublished(FraudAnalysis analysis, String correlationId) {

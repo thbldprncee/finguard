@@ -132,6 +132,32 @@ class RedisRulesIntegrationTest {
     }
 
     @Test
+    void countryChange_keepsOnlyWhatALateEventCanNeed_soMemoryDoesNotGrowWithVolume() {
+        var rule = new CountryChangeRule(redis, props);
+        UUID user = UUID.randomUUID();
+        String key = "fraud:countries:" + user;
+        Instant t0 = Instant.parse("2026-05-01T00:00:00Z");
+
+        // 100 transactions, 2 hours apart (max event lateness is 1 hour).
+        for (int i = 0; i < 100; i++) {
+            rule.evaluate(tx(user, UUID.randomUUID(), t0.plus(Duration.ofHours(2L * i)), "1", i == 99 ? "FR" : "US", null));
+        }
+        // Before the fix all 100 stayed for 30 days. Now: the newest plus its predecessor.
+        assertThat(redis.opsForZSet().zCard(key)).isEqualTo(2);
+
+        // A burst inside the lateness window is kept in full, plus one older entry.
+        Instant last = t0.plus(Duration.ofHours(198));
+        for (int i = 1; i <= 5; i++) {
+            rule.evaluate(tx(user, UUID.randomUUID(), last.plusSeconds(60L * i), "1", "FR", null));
+        }
+        assertThat(redis.opsForZSet().zCard(key)).isEqualTo(7);
+
+        // A late event within the window still finds its real predecessor.
+        RuleContext late = tx(user, UUID.randomUUID(), last.plusSeconds(30), "1", "DE", null);
+        assertThat(rule.evaluate(late).reason()).isEqualTo("Country changed from FR to DE");
+    }
+
+    @Test
     void newDevice_firstTransactionByCreationTime_isTheNewOne_evenIfProcessedLater() {
         var rule = new NewDeviceRule(redis, props);
         UUID user = UUID.randomUUID();
@@ -158,6 +184,29 @@ class RedisRulesIntegrationTest {
         RuleResult late = rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(4), "1", "US", null));
         assertThat(late.triggered()).isTrue();
         assertThat(late.reason()).startsWith("4 transactions");
+    }
+
+    @Test
+    void structuring_activeAccount_readsNewestFirst_andStopsOnceTriggered() {
+        var rule = new StructuringRule(redis, props);
+        UUID user = UUID.randomUUID();
+        Instant t0 = Instant.parse("2026-05-01T00:00:00Z");
+
+        // 300 payments of 100 within the window: the total crosses 10000 at the 101st newest,
+        // i.e. in the third page of 50, without reading the remaining 199.
+        RuleResult last = null;
+        for (int i = 0; i < 300; i++) {
+            last = rule.evaluate(tx(user, UUID.randomUUID(), t0.plusSeconds(60L * i), "100", "US", null));
+        }
+        assertThat(last.triggered()).isTrue();
+        assertThat(last.reason()).startsWith("101 transactions").contains("totalling 10100");
+
+        // Below the threshold in total: the whole window is read and the rule does not trigger.
+        UUID quiet = UUID.randomUUID();
+        for (int i = 0; i < 99; i++) {
+            last = rule.evaluate(tx(quiet, UUID.randomUUID(), t0.plusSeconds(60L * i), "100", "US", null));
+        }
+        assertThat(last.triggered()).as("99 x 100 = 9900").isFalse();
     }
 
     @Test

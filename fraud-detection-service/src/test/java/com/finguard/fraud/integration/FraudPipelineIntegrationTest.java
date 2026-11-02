@@ -4,11 +4,15 @@ import com.finguard.fraud.entity.FraudAnalysis;
 import com.finguard.fraud.outbox.OutboxEventRepository;
 import com.finguard.fraud.repository.FraudAnalysisRepository;
 import com.finguard.fraud.repository.FraudRuleRepository;
+import com.finguard.fraud.dto.FraudRuleUpdateRequest;
+import com.finguard.fraud.exception.StaleVersionException;
+import com.finguard.fraud.service.FraudAnalysisService;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
@@ -22,8 +26,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -60,6 +70,7 @@ class FraudPipelineIntegrationTest {
     @Autowired FraudAnalysisRepository analysisRepository;
     @Autowired FraudRuleRepository ruleRepository;
     @Autowired OutboxEventRepository outboxRepository;
+    @Autowired FraudAnalysisService fraudAnalysisService;
 
     private Map<String, Object> event(UUID txId, UUID userId, String amount, String category) {
         Map<String, Object> e = new HashMap<>();
@@ -108,7 +119,7 @@ class FraudPipelineIntegrationTest {
     void disablingARuleInTheDatabase_changesTheScore() {
         var rule = ruleRepository.findAll().stream().filter(r -> r.getCode().equals("SUSPICIOUS_MERCHANT")).findFirst().orElseThrow();
         rule.setEnabled(false);
-        ruleRepository.save(rule);
+        rule = ruleRepository.save(rule); // keep the returned copy: it carries the new @Version
         try {
             UUID txId = UUID.randomUUID();
             UUID userId = UUID.randomUUID();
@@ -152,5 +163,60 @@ class FraudPipelineIntegrationTest {
         FraudAnalysis analysis = analysisRepository.findByTransactionId(txId).orElseThrow();
         assertThat(analysis.getDecision()).isEqualTo(FraudAnalysis.Decision.REVIEW_REQUIRED);
         assertThat(analysis.getFailedRules()).containsExactly("ENGINE");
+    }
+
+    /**
+     * Two admins edited the same version of a rule and press Save at the same moment.
+     * Exactly one change may win; the other must fail instead of silently overwriting it.
+     */
+    @Test
+    void concurrentRuleUpdates_withTheSameVersion_onlyOneWins() throws Exception {
+        var rule = ruleRepository.findAll().stream().filter(r -> r.getCode().equals("NIGHT_ACTIVITY")).findFirst().orElseThrow();
+        long version = rule.getVersion();
+        int originalWeight = rule.getWeight();
+        boolean originalEnabled = rule.isEnabled();
+
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Callable<Object> disable = () -> {
+                start.await();
+                return fraudAnalysisService.updateRule(rule.getId(), version, new FraudRuleUpdateRequest(false, null), UUID.randomUUID(), null);
+            };
+            Callable<Object> reweight = () -> {
+                start.await();
+                return fraudAnalysisService.updateRule(rule.getId(), version, new FraudRuleUpdateRequest(null, 50), UUID.randomUUID(), null);
+            };
+            Future<Object> a = pool.submit(disable);
+            Future<Object> b = pool.submit(reweight);
+            start.countDown();
+
+            int succeeded = 0;
+            int rejected = 0;
+            for (Future<Object> f : List.of(a, b)) {
+                try {
+                    f.get();
+                    succeeded++;
+                } catch (java.util.concurrent.ExecutionException e) {
+                    assertThat(e.getCause()).isInstanceOfAny(StaleVersionException.class, ObjectOptimisticLockingFailureException.class);
+                    rejected++;
+                }
+            }
+            assertThat(succeeded).isEqualTo(1);
+            assertThat(rejected).isEqualTo(1);
+
+            var stored = ruleRepository.findById(rule.getId()).orElseThrow();
+            assertThat(stored.getVersion()).isEqualTo(version + 1);
+            // Exactly one of the two changes is visible, never a mix that loses the other silently.
+            boolean disabledWon = !stored.isEnabled() && stored.getWeight() == originalWeight;
+            boolean reweightWon = stored.isEnabled() == originalEnabled && stored.getWeight() == 50;
+            assertThat(disabledWon ^ reweightWon).isTrue();
+        } finally {
+            pool.shutdownNow();
+            var current = ruleRepository.findById(rule.getId()).orElseThrow();
+            current.setEnabled(originalEnabled);
+            current.setWeight(originalWeight);
+            ruleRepository.save(current);
+        }
     }
 }

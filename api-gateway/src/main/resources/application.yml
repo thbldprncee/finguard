@@ -6,35 +6,46 @@ spring:
     name: api-gateway
   cloud:
     gateway:
-      httpclient:
-        connect-timeout: 5000
-        response-timeout: 30s
-      globalcors:
-        cors-configurations:
-          '[/**]':
-            # The frontend is served from the same origin via nginx; this only matters for other origins.
-            allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
-            allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS
-            allowed-headers: Authorization,Content-Type,Idempotency-Key,X-Correlation-Id,X-Device-Id
-            exposed-headers: X-Correlation-Id,Idempotent-Replayed,Retry-After
-            allow-credentials: true
-            max-age: 3600
-      default-filters:
-        - SecureHeaders
-        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
-      routes:
-        - id: transaction-service
-          uri: ${TRANSACTION_SERVICE_URL:http://localhost:8082}
-          predicates:
-            - Path=/api/transactions/**,/api/transactions,/api/accounts/**,/api/accounts
-        - id: fraud-service
-          uri: ${FRAUD_SERVICE_URL:http://localhost:8083}
-          predicates:
-            - Path=/api/fraud/**
-        - id: audit-service
-          uri: ${AUDIT_SERVICE_URL:http://localhost:8085}
-          predicates:
-            - Path=/api/audit/**
+      # Spring Cloud Gateway 4.3+ moved the server properties under server.webflux.
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 5000
+            response-timeout: 30s
+            pool:
+              # Pooled connections must be dropped before the services' Tomcat closes them
+              # (keep-alive timeout 20 s, see server.tomcat in the services); otherwise the
+              # gateway reuses a connection the service is closing: "Connection prematurely
+              # closed BEFORE response", returned to the client as 500.
+              max-idle-time: 10s
+              max-life-time: 60s
+              eviction-interval: 5s
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                # The frontend is served from the same origin via nginx; this only matters for other origins.
+                allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+                allowed-methods: GET,POST,PUT,PATCH,DELETE,OPTIONS
+                allowed-headers: Authorization,Content-Type,Idempotency-Key,X-Correlation-Id,X-Device-Id,If-Match
+                exposed-headers: X-Correlation-Id,Idempotent-Replayed,Retry-After,ETag
+                allow-credentials: true
+                max-age: 3600
+          default-filters:
+            - SecureHeaders
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
+          routes:
+            - id: transaction-service
+              uri: ${TRANSACTION_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/transactions/**,/api/transactions,/api/accounts/**,/api/accounts
+            - id: fraud-service
+              uri: ${FRAUD_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/fraud/**
+            - id: audit-service
+              uri: ${AUDIT_SERVICE_URL:http://localhost:8085}
+              predicates:
+                - Path=/api/audit/**
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     security:
@@ -66,3 +77,22 @@ logging:
   level:
     com.finguard: INFO
     org.springframework.cloud.gateway: WARN
+
+# Metrics for Prometheus (scraped inside the docker network; nginx does not proxy /actuator).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Histogram buckets, so Prometheus can compute p95/p99 across instances.
+      percentiles-histogram:
+        http.server.requests: true
+        spring.kafka.listener: true
