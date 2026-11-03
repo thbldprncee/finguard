@@ -25,7 +25,7 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("org.springframework.kafka:spring-kafka")
-    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.9.1")
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.10.0")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
 
     runtimeOnly("org.postgresql:postgresql")
